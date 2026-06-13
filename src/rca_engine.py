@@ -5,6 +5,18 @@ from typing import Any
 
 import pandas as pd
 
+from src.rag import retrieve_known_issues
+
+SEVERITY_PROXIMITY_WINDOWS = {
+    "critical": pd.Timedelta(minutes=30),
+    "major": pd.Timedelta(minutes=15),
+    "high": pd.Timedelta(minutes=15),
+    "minor": pd.Timedelta(minutes=5),
+    "medium": pd.Timedelta(minutes=5),
+    "low": pd.Timedelta(minutes=5),
+}
+DEFAULT_PROXIMITY_WINDOW = pd.Timedelta(minutes=5)
+
 
 @dataclass
 class EvidenceItem:
@@ -48,14 +60,34 @@ class RCAAnalysis:
     similar_incidents: list[dict[str, Any]]
 
 
-def analyze_incident(incident: dict[str, Any], telemetry: pd.DataFrame, memory: Any) -> RCAAnalysis:
+def analyze_incident(
+    incident: dict[str, Any],
+    telemetry: pd.DataFrame,
+    memory: Any,
+    reference_sources: list[dict[str, str]] | None = None,
+) -> RCAAnalysis:
     incident_telemetry = telemetry[telemetry["incident_id"] == incident["incident_id"]].copy()
-    evidence = detect_anomalies(incident_telemetry)
+    incident_telemetry, anchor_time = filter_to_incident_window(incident, incident_telemetry)
+    evidence = detect_anomalies(incident_telemetry, anchor_time)
+    
+    # Detect multi-tower scenarios for enhanced analysis
+    towers_involved = set(item.tower for item in evidence)
+    multi_tower_boost = 1.0 + (0.1 * (len(towers_involved) - 1)) if len(towers_involved) > 1 else 1.0
+    
     similar_incidents = memory.find_similar(
         service=incident["service"],
         evidence_terms=[item.signal for item in evidence],
     )
-    hypotheses = score_hypotheses(incident, evidence, similar_incidents)
+    hypotheses = score_hypotheses(incident, evidence, similar_incidents, reference_sources or [])
+    
+    # Boost confidence for hypotheses when multiple towers corroborate
+    if len(towers_involved) > 1:
+        for hyp in hypotheses:
+            hyp.confidence = min(0.99, hyp.confidence * multi_tower_boost)
+            hyp.confidence_drivers.append(
+                f"Cross-tower corroboration: anomalies detected in {len(towers_involved)} towers ({', '.join(sorted(towers_involved))})."
+            )
+    
     hypotheses = sorted(hypotheses, key=lambda item: item.confidence, reverse=True)
     return RCAAnalysis(
         primary=hypotheses[0],
@@ -65,139 +97,289 @@ def analyze_incident(incident: dict[str, Any], telemetry: pd.DataFrame, memory: 
     )
 
 
-def detect_anomalies(frame: pd.DataFrame) -> list[EvidenceItem]:
-    evidence: list[EvidenceItem] = []
+def detect_anomalies(
+    frame: pd.DataFrame,
+    anchor_time: pd.Timestamp | None = None,
+) -> list[EvidenceItem]:
+    evidence: list[tuple[float, EvidenceItem]] = []
     for _, row in frame.iterrows():
         baseline = float(row["baseline"])
         value = float(row["value"])
         if baseline == 0:
-            continue
-        anomaly_score = max(0.0, (value - baseline) / baseline)
+            if str(row.get("unit", "")).lower() != "anomaly" or value <= 0:
+                continue
+            anomaly_score = value
+        else:
+            anomaly_score = max(0.0, (value - baseline) / baseline)
+        gpu_score = _gpu_anomaly_score(row)
+        if gpu_score is not None:
+            anomaly_score = max(anomaly_score, gpu_score)
         if anomaly_score < 0.35:
             continue
 
         direction = "above"
+        gpu_context = ""
+        if gpu_score is not None:
+            gpu_context = f" GPU model score={gpu_score:.2f}."
         explanation = (
             f"{row['signal']} on {row['component']} is {anomaly_score:.1f}x "
-            f"{direction} baseline in the {row['tower']} tower."
+            f"{direction} baseline in the {row['tower']} tower.{gpu_context}"
         )
-        evidence.append(
-            EvidenceItem(
-                tower=str(row["tower"]),
-                signal=str(row["signal"]),
-                component=str(row["component"]),
-                observed=value,
-                baseline=baseline,
-                anomaly_score=anomaly_score,
-                timestamp=row["timestamp"].strftime("%Y-%m-%d %H:%M"),
-                explanation=explanation,
-            )
+        item = EvidenceItem(
+            tower=str(row["tower"]),
+            signal=str(row["signal"]),
+            component=str(row["component"]),
+            observed=value,
+            baseline=baseline,
+            anomaly_score=anomaly_score,
+            timestamp=row["timestamp"].strftime("%Y-%m-%d %H:%M"),
+            explanation=explanation,
         )
+        proximity_minutes = _proximity_minutes(row["timestamp"], anchor_time)
+        evidence.append((proximity_minutes, item))
 
-    return sorted(evidence, key=lambda item: item.anomaly_score, reverse=True)[:10]
+    ranked = sorted(evidence, key=lambda pair: (pair[0], -pair[1].anomaly_score))
+    return [item for _, item in ranked[:10]]
+
+
+def filter_to_incident_window(
+    incident: dict[str, Any],
+    frame: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.Timestamp | None]:
+    if frame.empty or "timestamp" not in frame.columns:
+        return frame, None
+
+    filtered = frame.copy()
+    filtered["timestamp"] = pd.to_datetime(filtered["timestamp"], errors="coerce")
+    filtered = filtered[filtered["timestamp"].notna()]
+    if filtered.empty:
+        return filtered, None
+
+    anchor_time = _affected_component_time(incident, filtered)
+    if anchor_time is None:
+        return filtered, None
+
+    proximity_window = proximity_window_for_incident(incident)
+    lower_bound = anchor_time - proximity_window
+    upper_bound = anchor_time + proximity_window
+    return filtered[
+        (filtered["timestamp"] >= lower_bound)
+        & (filtered["timestamp"] <= upper_bound)
+    ].copy(), anchor_time
+
+
+def _affected_component_time(
+    incident: dict[str, Any],
+    frame: pd.DataFrame,
+) -> pd.Timestamp | None:
+    affected_component = str(incident.get("service", "")).strip()
+    started_at = pd.to_datetime(incident.get("started_at"), errors="coerce")
+    component_rows = frame
+    if affected_component:
+        component_rows = frame[frame["component"].astype(str) == affected_component]
+
+    if component_rows.empty:
+        if pd.notna(started_at):
+            return started_at
+        return frame["timestamp"].min()
+
+    if pd.notna(started_at):
+        distances = (component_rows["timestamp"] - started_at).abs()
+        return component_rows.loc[distances.idxmin(), "timestamp"]
+
+    return component_rows["timestamp"].min()
+
+
+def proximity_window_for_incident(incident: dict[str, Any]) -> pd.Timedelta:
+    severity = str(incident.get("severity", "")).strip().lower()
+    return SEVERITY_PROXIMITY_WINDOWS.get(severity, DEFAULT_PROXIMITY_WINDOW)
+
+
+def _proximity_minutes(
+    timestamp: Any,
+    anchor_time: pd.Timestamp | None,
+) -> float:
+    if anchor_time is None:
+        return 0.0
+    timestamp = pd.to_datetime(timestamp, errors="coerce")
+    if pd.isna(timestamp):
+        return float("inf")
+    return abs((timestamp - anchor_time).total_seconds()) / 60
+
+
+def _gpu_anomaly_score(row: pd.Series) -> float | None:
+    if "gpu_anomaly_score" not in row:
+        return None
+    score = pd.to_numeric(row.get("gpu_anomaly_score"), errors="coerce")
+    if pd.isna(score):
+        return None
+    return float(score)
 
 
 def score_hypotheses(
     incident: dict[str, Any],
     evidence: list[EvidenceItem],
     similar_incidents: list[dict[str, Any]],
+    reference_sources: list[dict[str, str]] | None = None,
 ) -> list[Hypothesis]:
-    service = incident["service"]
-    tower_scores = _tower_scores(evidence)
-    memory_boost = min(0.10, len(similar_incidents) * 0.04)
+    rag_hypotheses = _score_reference_hypotheses(
+        evidence,
+        similar_incidents,
+        reference_sources or [],
+    )
+    if rag_hypotheses:
+        return rag_hypotheses
 
-    storage_score = _bounded(0.35 + tower_scores.get("storage", 0) * 0.35 + tower_scores.get("application", 0) * 0.15 + memory_boost)
-    app_score = _bounded(0.30 + tower_scores.get("application", 0) * 0.30 + memory_boost)
-    compute_score = _bounded(0.22 + tower_scores.get("compute", 0) * 0.28)
-    network_score = _bounded(0.20 + tower_scores.get("network", 0) * 0.28)
+    memory_hypotheses = _score_memory_hypotheses(evidence, similar_incidents)
+    if memory_hypotheses:
+        return memory_hypotheses
 
-    if "inventory" in service:
-        app_score = _bounded(app_score + 0.22)
-        storage_score = _bounded(storage_score - 0.18)
+    return _no_reference_hypothesis(evidence)
 
-    refs_by_tower = _refs_by_tower(evidence)
-    return [
-        Hypothesis(
-            title="Storage latency caused downstream application timeouts",
-            summary=(
-                "The strongest leading indicator is abnormal storage latency on a service "
-                "dependency, followed by application latency and errors."
-            ),
-            confidence=storage_score,
-            confidence_drivers=[
-                "Storage anomaly has high magnitude and appears on a declared dependency.",
-                "Application errors align with the storage degradation window.",
-                "Historical feedback can boost this pattern when similar incidents are stored.",
-            ],
-            rejection_reasons=[
-                "Ranked lower if application-only deployment errors are stronger than storage evidence.",
-                "Requires validation from database or storage platform owners.",
-            ],
-            evidence_refs=refs_by_tower.get("storage", []) + refs_by_tower.get("application", []),
-        ),
-        Hypothesis(
-            title="Application deployment or code regression",
-            summary=(
-                "Application-level error signals may indicate a bad release, configuration issue, "
-                "or dependency handling regression."
-            ),
-            confidence=app_score,
-            confidence_drivers=[
-                "Application errors are elevated inside the incident window.",
-                "This hypothesis gains weight when deployment error signals spike.",
-            ],
-            rejection_reasons=[
-                "Infrastructure evidence explains the application symptoms more directly when present.",
-                "Needs release metadata or rollback evidence to become primary.",
-            ],
-            evidence_refs=refs_by_tower.get("application", []),
-        ),
-        Hypothesis(
-            title="Compute resource pressure",
-            summary=(
-                "CPU or memory pressure may have reduced service capacity and amplified latency."
-            ),
-            confidence=compute_score,
-            confidence_drivers=[
-                "Compute metrics are checked for saturation and resource pressure.",
-            ],
-            rejection_reasons=[
-                "Compute anomalies are weaker than the leading storage/application signals.",
-                "No pod restart or node failure evidence dominates the incident.",
-            ],
-            evidence_refs=refs_by_tower.get("compute", []),
-        ),
-        Hypothesis(
-            title="Network degradation between service dependencies",
-            summary=(
-                "Packet loss or load balancer latency could explain intermittent timeouts."
-            ),
-            confidence=network_score,
-            confidence_drivers=[
-                "Network metrics are checked for packet loss, latency, and load balancer symptoms.",
-            ],
-            rejection_reasons=[
-                "Network anomaly magnitude is lower than the leading hypothesis.",
-                "The blast radius appears service-specific rather than network-wide.",
-            ],
-            evidence_refs=refs_by_tower.get("network", []),
-        ),
+
+def _score_reference_hypotheses(
+    evidence: list[EvidenceItem],
+    similar_incidents: list[dict[str, Any]],
+    reference_sources: list[dict[str, str]],
+) -> list[Hypothesis]:
+    query_terms = []
+    for item in evidence:
+        query_terms.extend([item.tower, item.signal, item.component, item.explanation])
+
+    # Use Chroma vector DB for semantic search
+    known_issues = retrieve_known_issues(reference_sources=reference_sources, query_terms=query_terms)
+    if not known_issues:
+        return []
+
+    max_score = max(issue["score"] for issue in known_issues) or 1
+    hypotheses = []
+    for issue in known_issues:
+        confidence = _bounded(0.35 + (issue["score"] / max_score) * 0.45)
+        matched_evidence = _matching_evidence(issue["body"], evidence)
+        hypotheses.append(
+            Hypothesis(
+                title=issue["title"],
+                summary=f"{issue['body']} Source: {issue['source']}.",
+                confidence=confidence,
+                confidence_drivers=[
+                    "Retrieved from Chroma vector database via semantic RAG.",
+                    "Ranked by vector similarity with anomalous tower signals and components.",
+                ],
+                rejection_reasons=[
+                    "Ranked lower when vector similarity or evidence match is weaker.",
+                    "Requires operator validation before declaring causation.",
+                ],
+                evidence_refs=matched_evidence,
+            )
+        )
+
+    return _apply_feedback_learning(hypotheses, similar_incidents)
+
+
+def _matching_evidence(issue_text: str, evidence: list[EvidenceItem]) -> list[str]:
+    issue_text = issue_text.lower()
+    matches = [
+        item.explanation
+        for item in evidence
+        if item.tower.lower() in issue_text
+        or item.component.lower() in issue_text
+        or any(token in issue_text for token in item.signal.lower().split("_"))
     ]
+    return matches or [item.explanation for item in evidence[:3]]
 
 
-def _tower_scores(evidence: list[EvidenceItem]) -> dict[str, float]:
-    scores: dict[str, float] = {}
-    for item in evidence:
-        scores[item.tower] = max(scores.get(item.tower, 0.0), min(item.anomaly_score / 6, 1.0))
-    return scores
+def _score_memory_hypotheses(
+    evidence: list[EvidenceItem],
+    similar_incidents: list[dict[str, Any]],
+) -> list[Hypothesis]:
+    if not similar_incidents:
+        return []
 
+    counts: dict[str, dict[str, Any]] = {}
+    for incident in similar_incidents:
+        selected = incident.get("selected_root_cause", "Unknown")
+        correctness = incident.get("correctness", "")
+        if selected not in counts:
+            counts[selected] = {"count": 0, "score": 0.0, "correctness": []}
+        counts[selected]["count"] += 1
+        if correctness == "Correct":
+            counts[selected]["score"] += 1.0
+        elif correctness == "Partially correct":
+            counts[selected]["score"] += 0.5
+        else:
+            counts[selected]["score"] += 0.2
+        counts[selected]["correctness"].append(correctness)
 
-def _refs_by_tower(evidence: list[EvidenceItem]) -> dict[str, list[str]]:
-    refs: dict[str, list[str]] = {}
-    for item in evidence:
-        refs.setdefault(item.tower, []).append(item.explanation)
-    return refs
+    sorted_roots = sorted(
+        counts.items(),
+        key=lambda item: (item[1]["score"], item[1]["count"]),
+        reverse=True,
+    )
+
+    hypotheses: list[Hypothesis] = []
+    for root_cause, stats in sorted_roots[:3]:
+        confidence = _bounded(0.25 + min(stats["score"], 2.0) * 0.2)
+        hypotheses.append(
+            Hypothesis(
+                title=root_cause,
+                summary=(
+                    "Historical incident memory suggests this root cause for similar service incidents. "
+                    "Use operator validation and current evidence to confirm the candidate."
+                ),
+                confidence=confidence,
+                confidence_drivers=[
+                    "Derived from similar past incidents with operator feedback.",
+                    f"{stats['count']} similar incident(s) matched based on service and evidence terms.",
+                ],
+                rejection_reasons=[
+                    "This candidate comes from prior incident memory, not from a direct Chroma vector match.",
+                    "Verify with current telemetry anomalies before treating it as the only cause.",
+                ],
+                evidence_refs=[item.explanation for item in evidence[:3]],
+            )
+        )
+
+    return hypotheses
 
 
 def _bounded(value: float) -> float:
     return max(0.05, min(value, 0.96))
+
+
+def _no_reference_hypothesis(evidence: list[EvidenceItem]) -> list[Hypothesis]:
+    return [
+        Hypothesis(
+            title="No matching known issue found in reference repository",
+            summary="The agent found anomalies, but no vector match in Chroma DB matched strongly enough.",
+            confidence=0.20,
+            confidence_drivers=["RCA hypotheses should come from the Chroma vector database."],
+            rejection_reasons=["Add or update known issues to improve Chroma vector DB coverage."],
+            evidence_refs=[item.explanation for item in evidence[:3]],
+        )
+    ]
+
+
+def _apply_feedback_learning(
+    hypotheses: list[Hypothesis],
+    similar_incidents: list[dict[str, Any]],
+) -> list[Hypothesis]:
+    for hypothesis in hypotheses:
+        adjustment = 0.0
+        for incident in similar_incidents:
+            correctness = incident.get("correctness", "")
+            selected = incident.get("selected_root_cause", "")
+            agent_root = incident.get("agent_root_cause", "")
+            if selected == hypothesis.title and correctness == "Correct":
+                adjustment += 0.10
+            elif selected == hypothesis.title and correctness == "Partially correct":
+                adjustment += 0.05
+            elif agent_root == hypothesis.title and correctness == "Incorrect":
+                adjustment -= 0.08
+
+        if adjustment:
+            hypothesis.confidence = _bounded(hypothesis.confidence + adjustment)
+            direction = "boosted" if adjustment > 0 else "reduced"
+            hypothesis.confidence_drivers.append(
+                f"Historical user feedback {direction} this hypothesis by {abs(adjustment):.0%}."
+            )
+    return hypotheses

@@ -51,3 +51,20 @@ def _chat_endpoint() -> str:
     if base_url.endswith("/v1"):
         return f"{base_url}/chat/completions"
     return DEFAULT_VLLM_URL if base_url == "http://localhost:8000" else f"{base_url}/v1/chat/completions"
+
+
+def vllm_base_url() -> str:
+    base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000").rstrip("/")
+    if base_url.endswith("/v1/chat/completions"):
+        return base_url[: -len("/chat/completions")]
+    if base_url.endswith("/v1"):
+        return base_url
+    return f"{base_url}/v1"
+
+
+def vllm_model() -> str:
+    return os.getenv("VLLM_MODEL", DEFAULT_MODEL)
+
+
+def vllm_api_key() -> str:
+    return os.getenv("VLLM_API_KEY", "EMPTY")

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
+from src.llm_orchestration import LLMOrchestrator
+from src.reference_loader import RCA_GENERATION_RULES
 from src.rca_engine import RCAAnalysis
-from src.vllm_client import generate_with_vllm, is_vllm_configured
+
+orchestrator = LLMOrchestrator()
 
 
 def build_rca_markdown(
@@ -9,20 +14,7 @@ def build_rca_markdown(
     analysis: RCAAnalysis,
     reference_sources: list[dict[str, str]] | None = None,
 ) -> str:
-    if is_vllm_configured():
-        try:
-            return _build_vllm_report(incident, analysis, reference_sources or [])
-        except Exception as exc:
-            return (
-                _build_deterministic_report(incident, analysis, reference_sources or [])
-                + f"\n\n**vLLM Status**\n\nConfigured, but request failed: `{exc}`. "
-                + "Showing deterministic fallback RCA from structured evidence."
-            )
-
-    return (
-        _build_deterministic_report(incident, analysis, reference_sources or [])
-        + "\n\n**vLLM Status**\n\nSet `VLLM_BASE_URL` or `USE_VLLM=1` to generate this RCA through a vLLM OpenAI-compatible endpoint."
-    )
+    return orchestrator.generate_rca_report(incident, analysis, reference_sources or [])
 
 
 def _build_deterministic_report(
@@ -102,6 +94,9 @@ def _build_vllm_report(
 Incident:
 {incident}
 
+RCA generation rules:
+{RCA_GENERATION_RULES.strip()}
+
 Primary hypothesis:
 {analysis.primary.title}
 Confidence: {analysis.primary.confidence:.0%}
@@ -121,4 +116,5 @@ Return Markdown with these sections:
 Executive Summary, Most Likely Root Cause, Evidence, Confidence Rationale,
 Alternative Hypotheses, Recommended Remediation, Reference Sources Used.
 """
+    from src.vllm_client import generate_with_vllm
     return generate_with_vllm(system_prompt=system_prompt, user_prompt=user_prompt)

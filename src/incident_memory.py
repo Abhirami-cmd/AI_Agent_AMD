@@ -1,64 +1,56 @@
 from __future__ import annotations
 
-import json
-from datetime import datetime
-from pathlib import Path
 from typing import Any
+
+from src.config import settings
+from pathlib import Path
+from src.models import MemoryRecord
+from src.repos.memory_repo import (
+    IncidentMemoryRepository,
+    JsonIncidentMemoryRepository,
+    SQLiteIncidentMemoryRepository,
+)
 
 
 class IncidentMemory:
-    def __init__(self, path: str | Path = "data/incident_memory.json") -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self.path.write_text("[]", encoding="utf-8")
+    def __init__(self, repository: IncidentMemoryRepository | str | Path | None = None) -> None:
+        if isinstance(repository, (str, Path)):
+            self.repository = JsonIncidentMemoryRepository(repository)
+        elif repository is not None:
+            self.repository = repository
+        elif settings.database_url.startswith("sqlite"):
+            self.repository = SQLiteIncidentMemoryRepository("data/incident_memory.db")
+        else:
+            self.repository = JsonIncidentMemoryRepository()
 
     def load_all(self) -> list[dict[str, Any]]:
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
+        return [record.dict() for record in self.repository.load_all()]
 
     def save_feedback(
         self,
         incident_id: str,
         service: str,
         selected_root_cause: str,
+        actual_root_cause: str | None,
         agent_root_cause: str,
         correctness: str,
         notes: str,
         evidence_summary: str,
     ) -> None:
-        records = self.load_all()
-        records.append(
-            {
-                "stored_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                "incident_id": incident_id,
-                "service": service,
-                "selected_root_cause": selected_root_cause,
-                "agent_root_cause": agent_root_cause,
-                "correctness": correctness,
-                "notes": notes,
-                "evidence_summary": evidence_summary,
-            }
+        self.repository.save_feedback(
+            incident_id=incident_id,
+            service=service,
+            selected_root_cause=selected_root_cause,
+            actual_root_cause=actual_root_cause,
+            agent_root_cause=agent_root_cause,
+            correctness=correctness,
+            notes=notes,
+            evidence_summary=evidence_summary,
         )
-        self.path.write_text(json.dumps(records, indent=2), encoding="utf-8")
+
+    def seed_records(self, records: list[MemoryRecord]) -> None:
+        for record in records:
+            self.repository.save_record(record)
 
     def find_similar(self, service: str, evidence_terms: list[str]) -> list[dict[str, Any]]:
-        terms = {term.lower() for term in evidence_terms}
-        matches = []
-        for record in self.load_all():
-            haystack = " ".join(
-                [
-                    record.get("service", ""),
-                    record.get("selected_root_cause", ""),
-                    record.get("agent_root_cause", ""),
-                    record.get("evidence_summary", ""),
-                    record.get("notes", ""),
-                ]
-            ).lower()
-            service_match = record.get("service") == service
-            term_overlap = any(term in haystack for term in terms)
-            if service_match or term_overlap:
-                matches.append(record)
-        return matches[:3]
+        return [record.dict() for record in self.repository.find_similar(service, evidence_terms)]

@@ -197,6 +197,9 @@ For the hackathon MVP, the project can support both simulated and file-based dat
 - JSON event streams for deployments, alerts, and topology.
 - Sample log files with timestamped application errors.
 - PDF runbook used as a reference source during RCA inference.
+   - The runbook PDF is indexed into a Chroma vector store for semantic RAG.
+      A helper script `scripts/generate_reference_pdf.py` creates `data/reference_runbook.pdf` from the repository content when needed.
+      The Chroma collection is populated on first access; set `CHROMA_PERSIST_DIR` (default `data/chroma`) to enable local persistent storage using `duckdb+parquet` if supported by your `chromadb` installation.
 - Optional live integrations if time permits.
 
 ### Common Incident Schema
@@ -366,6 +369,7 @@ Responsibilities:
 - vLLM-hosted LLM for RCA report generation through the OpenAI-compatible API
 - Retrieval over historical incidents
 - PDF runbook reference context for grounded inference
+   - Semantic retrieval is performed using a local Chroma vector DB that indexes the runbook contents (or uses fallback text when the PDF is missing). The Streamlit UI displays whether the PDF or fallback text was used for grounding.
 - Prompt templates for structured RCA output
 
 ## 13. MVP Scope
