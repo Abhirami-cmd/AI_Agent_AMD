@@ -1,15 +1,16 @@
 incident_id,split,anomaly_type,start,end,towers,components,signals
-SYN-TRAIN-CPU-001,train,CPU saturation,2026-01-06 10:00:00,2026-01-06 16:00:00,Compute|Network|Storage,Cluster-C|Core-Switch-1|Edge-Router-2|LoadBalancer-3|SAN-1,cpu_utilization|memory_usage|request_latency|error_rate
-SYN-TRAIN-MEM-001,train,Memory leak,2026-01-12 08:00:00,2026-01-12 16:00:00,Storage|Application,SAN-1|NAS-2|ObjectStore-3|Payments|Orders,memory_usage|cpu_utilization|request_latency|error_rate
-SYN-TRAIN-DISK-001,train,Disk I/O bottleneck,2026-01-18 15:00:00,2026-01-18 21:00:00,Application,Payments|Orders|Inventory|EmailService,disk_io|cpu_utilization|request_latency|error_rate
-SYN-TRAIN-NET-001,train,Network corruption,2026-01-04 09:00:00,2026-01-04 14:00:00,Compute|Network,Cluster-A|Cluster-B|Cluster-C|Core-Switch-1|Edge-Router-2,network_latency|request_latency|error_rate
-SYN-TRAIN-GPU-001,train,GPU overload,2026-01-08 12:00:00,2026-01-08 19:00:00,Application|Compute|Network,RecommendationService|Cluster-A|Cluster-B|Cluster-C|Core-Switch-1,gpu_utilization|gpu_temperature|request_latency|error_rate
-SYN-TRAIN-CPU-002,train,CPU saturation,2026-01-10 06:00:00,2026-01-10 14:00:00,Application|Compute,Inventory|EmailService|RecommendationService|Cluster-A,cpu_utilization|memory_usage|request_latency|error_rate
-SYN-TRAIN-MEM-002,train,Memory leak,2026-01-14 10:00:00,2026-01-14 17:00:00,Compute|Network,Cluster-B|Cluster-C|Core-Switch-1|Edge-Router-2,memory_usage|request_latency|error_rate
-SYN-TRAIN-DISK-002,train,Disk I/O bottleneck,2026-01-16 07:00:00,2026-01-16 15:00:00,Compute|Network|Application,Cluster-B|LoadBalancer-3|Payments|RecommendationService|Core-Switch-1,disk_io|request_latency|error_rate
-SYN-TRAIN-NET-002,train,Network corruption,2026-01-20 11:00:00,2026-01-20 17:00:00,Network|Storage,LoadBalancer-3|SAN-1|NAS-2|ObjectStore-3,network_latency|request_latency|error_rate
-SYN-TRAIN-GPU-002,train,GPU overload,2026-01-23 13:00:00,2026-01-23 19:00:00,Network|Storage,Core-Switch-1|NAS-2|LoadBalancer-3,gpu_utilization|gpu_temperature|request_latency|error_rate
-SYN-LIVE-NET-001,live,Network corruption,2026-01-25 09:00:00,2026-01-25 15:00:00,Compute|Network|Application,Cluster-B|Edge-Router-2|LoadBalancer-3|EmailService|Edge-Router-2,network_latency|error_rate|request_latency
-SYN-LIVE-GPU-001,live,GPU overload,2026-01-28 13:00:00,2026-01-28 21:00:00,Storage|Application|Compute|Network,ObjectStore-3|RecommendationService|Cluster-A|Cluster-B|LoadBalancer-3,gpu_utilization|gpu_temperature|request_latency|error_rate
-SYN-LIVE-CPU-002,live,CPU saturation,2026-01-30 07:00:00,2026-01-30 13:00:00,Compute|Application|Network,Cluster-A|Orders|Cluster-C|Core-Switch-1,cpu_utilization|memory_usage|request_latency|error_rate
-SYN-LIVE-MEM-001,live,Memory leak,2026-01-26 16:00:00,2026-01-26 21:00:00,Compute|Application|Network,Cluster-C|Inventory|LoadBalancer-3,memory_usage|request_latency|error_rate
+email_inc_001,live,email delivery failure,25-01-2026 09:00,25-01-2026 09:30,Network|Compute|Application|Storage,Edge-Router-2|Cluster-B|EmailService|MailStore-1,packet_loss|cpu_usage|error_rate|queue_depth|latency
+SYN-TRAIN-CPU-001,train,CPU saturation,06-01-2026 10:00,06-01-2026 16:00,Compute|Network|Storage,Cluster-C|Core-Switch-1|Edge-Router-2|LoadBalancer-3|SAN-1,cpu_utilization|memory_usage|request_latency|error_rate
+SYN-TRAIN-MEM-001,train,Memory leak,12-01-2026 08:00,12-01-2026 16:00,Storage|Application,SAN-1|NAS-2|ObjectStore-3|Payments|Orders,memory_usage|cpu_utilization|request_latency|error_rate
+SYN-TRAIN-DISK-001,train,Disk I/O bottleneck,18-01-2026 15:00,18-01-2026 21:00,Application,Payments|Orders|Inventory|EmailService,disk_io|cpu_utilization|request_latency|error_rate
+SYN-TRAIN-NET-001,train,Network corruption,04-01-2026 09:00,04-01-2026 14:00,Compute|Network,Cluster-A|Cluster-B|Cluster-C|Core-Switch-1|Edge-Router-2,network_latency|request_latency|error_rate
+SYN-TRAIN-GPU-001,train,GPU overload,08-01-2026 12:00,08-01-2026 19:00,Application|Compute|Network,RecommendationService|Cluster-A|Cluster-B|Cluster-C|Core-Switch-1,gpu_utilization|gpu_temperature|request_latency|error_rate
+SYN-TRAIN-CPU-002,train,CPU saturation,10-01-2026 06:00,10-01-2026 14:00,Application|Compute,Inventory|EmailService|RecommendationService|Cluster-A,cpu_utilization|memory_usage|request_latency|error_rate
+SYN-TRAIN-MEM-002,train,Memory leak,14-01-2026 10:00,14-01-2026 17:00,Compute|Network,Cluster-B|Cluster-C|Core-Switch-1|Edge-Router-2,memory_usage|request_latency|error_rate
+SYN-TRAIN-DISK-002,train,Disk I/O bottleneck,16-01-2026 07:00,16-01-2026 15:00,Compute|Network|Application,Cluster-B|LoadBalancer-3|Payments|RecommendationService|Core-Switch-1,disk_io|request_latency|error_rate
+SYN-TRAIN-NET-002,train,Network corruption,20-01-2026 11:00,20-01-2026 17:00,Network|Storage,LoadBalancer-3|SAN-1|NAS-2|ObjectStore-3,network_latency|request_latency|error_rate
+SYN-TRAIN-GPU-002,train,GPU overload,23-01-2026 13:00,23-01-2026 19:00,Network|Storage,Core-Switch-1|NAS-2|LoadBalancer-3,gpu_utilization|gpu_temperature|request_latency|error_rate
+SYN-LIVE-NET-001,live,Network corruption,25-01-2026 09:00,25-01-2026 15:00,Compute|Network|Application,Cluster-B|Edge-Router-2|LoadBalancer-3|EmailService|Edge-Router-2,network_latency|error_rate|request_latency
+SYN-LIVE-GPU-001,live,GPU overload,28-01-2026 13:00,28-01-2026 21:00,Storage|Application|Compute|Network,ObjectStore-3|RecommendationService|Cluster-A|Cluster-B|LoadBalancer-3,gpu_utilization|gpu_temperature|request_latency|error_rate
+SYN-LIVE-CPU-002,live,CPU saturation,30-01-2026 07:00,30-01-2026 13:00,Compute|Application|Network,Cluster-A|Orders|Cluster-C|Core-Switch-1,cpu_utilization|memory_usage|request_latency|error_rate
+SYN-LIVE-MEM-001,live,Memory leak,26-01-2026 16:00,26-01-2026 21:00,Compute|Application|Network,Cluster-C|Inventory|LoadBalancer-3,memory_usage|request_latency|error_rate
