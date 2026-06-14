@@ -236,12 +236,9 @@ Identify the time range where key service-level indicators degrade:
 
 ### Step 2: Anomaly Detection
 
-Compare current values against baseline behavior:
+Score telemetry with a PyTorch LSTM autoencoder over timestamp-ordered sliding windows. The model uses the existing multivariate feature set: observed value, baseline, delta, ratio, relative time, tower, signal, and component. Sequence reconstruction error is mapped back to each telemetry row as `gpu_anomaly_score`, preserving the downstream RCA contract. If a telemetry slice is too short for sequence modeling, the system falls back to the existing rule-based baseline deviation score.
 
-- Rolling average
-- Z-score
-- Percentile thresholds
-- Static rules for known severe conditions
+No live Prometheus integration is required for the MVP migration; simulated Prometheus-style telemetry continues to flow through the same dataframe interface.
 
 ### Step 3: Cross-Tower Correlation
 
@@ -360,7 +357,8 @@ Responsibilities:
 
 - Python
 - Pandas and NumPy for data processing
-- Scikit-learn for anomaly detection and similarity scoring
+- PyTorch for LSTM autoencoder anomaly detection
+- Pandas and NumPy for similarity-oriented feature preparation
 - SQLite or JSON for incident memory
 - Optional NetworkX for service dependency graph
 

@@ -43,10 +43,6 @@ def _build_deterministic_report(
 
 {incident["service"]} is experiencing a {incident["severity"].lower()} incident. The most likely root cause is **{primary.title}** with **{primary.confidence:.0%} confidence**.
 
-**What Happened**
-
-{primary.summary}
-
 **Primary Evidence**
 
 {evidence_lines}

@@ -16,20 +16,38 @@ from src.ingest.openrca_loader import (
 )
 from src.ingest.preprocessing import merge_datasets
 from src.ingest.servicenow_loader import load_servicenow_incidents
+from src.ingest.synthetic_loader import (
+    load_synthetic_incidents,
+    load_synthetic_telemetry,
+    synthetic_dataset_statistics,
+)
 from src.models import Incident, MemoryRecord, TelemetryPoint
 
 logger = logging.getLogger(__name__)
 
 
 def load_incidents(limit: int | None = None) -> pd.DataFrame:
-    incidents, _, _ = load_real_datasets()
-    frame = _incidents_to_frame(incidents)
+    frame = load_synthetic_incidents(settings.synthetic_metadata_path)
+    if frame.empty:
+        incidents, _, _ = load_real_datasets()
+        frame = _incidents_to_frame(incidents)
     return frame.head(limit) if limit else frame
 
 
 def load_telemetry() -> pd.DataFrame:
+    frame = load_synthetic_telemetry(settings.synthetic_live_path)
+    if not frame.empty:
+        return frame
     _, telemetry, _ = load_real_datasets()
     return _telemetry_to_frame(telemetry)
+
+
+def load_training_telemetry() -> pd.DataFrame:
+    return load_synthetic_telemetry(settings.synthetic_train_path)
+
+
+def load_telemetry_dataset_statistics(metadata: dict[str, object] | None = None) -> dict[str, object]:
+    return synthetic_dataset_statistics(load_telemetry(), metadata)
 
 
 def load_servicenow_memory_records() -> list[MemoryRecord]:

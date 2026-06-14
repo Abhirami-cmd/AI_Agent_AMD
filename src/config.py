@@ -13,6 +13,15 @@ class Settings(BaseSettings):
     database_url: str = Field(default="sqlite:///data/incident_memory.db", env="DATABASE_URL")
     api_key: str = Field(default="", env="API_KEY")
     debug: bool = Field(default=False, env="DEBUG")
+    cross_tower_time_window_minutes: int = Field(default=15, env="CROSS_TOWER_TIME_WINDOW_MINUTES")
+    cross_tower_anomaly_score_threshold: float = Field(default=0.65, env="CROSS_TOWER_ANOMALY_SCORE_THRESHOLD")
+    cross_tower_min_towers: int = Field(default=2, env="CROSS_TOWER_MIN_TOWERS")
+    cross_tower_min_components: int = Field(default=2, env="CROSS_TOWER_MIN_COMPONENTS")
+    cross_tower_duplicate_suppression_minutes: int = Field(
+        default=10,
+        env="CROSS_TOWER_DUPLICATE_SUPPRESSION_MINUTES",
+    )
+    cross_tower_max_candidates: int = Field(default=5, env="CROSS_TOWER_MAX_CANDIDATES")
     openrca_cloudbed1_query_path: str = Field(
         default="data/openrca/market_cloudbed_1/query.csv",
         env="OPENRCA_CLOUDBED1_QUERY_PATH",
@@ -48,6 +57,18 @@ class Settings(BaseSettings):
     servicenow_path: str = Field(
         default="data/servicenow/incident_event_log.csv",
         env="SERVICENOW_PATH",
+    )
+    synthetic_train_path: str = Field(
+        default="data/synthetic_telemetry/synthetic_train.csv",
+        env="SYNTHETIC_TRAIN_PATH",
+    )
+    synthetic_live_path: str = Field(
+        default="data/synthetic_telemetry/synthetic_live.csv",
+        env="SYNTHETIC_LIVE_PATH",
+    )
+    synthetic_metadata_path: str = Field(
+        default="data/synthetic_telemetry/anomaly_metadata.csv",
+        env="SYNTHETIC_METADATA_PATH",
     )
 
     @field_validator("debug", mode="before")

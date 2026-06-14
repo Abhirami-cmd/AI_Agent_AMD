@@ -139,6 +139,43 @@ def dependency_map_for_telemetry(
     return pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
 
 
+def _telemetry_anomaly_score(row: pd.Series) -> float:
+    gpu_score = pd.to_numeric(row.get("gpu_anomaly_score"), errors="coerce")
+    if pd.notna(gpu_score):
+        return float(gpu_score)
+    baseline = pd.to_numeric(row.get("baseline"), errors="coerce")
+    value = pd.to_numeric(row.get("value"), errors="coerce")
+    if pd.isna(baseline) or pd.isna(value) or float(baseline) == 0:
+        return 0.0
+    return max(0.0, (float(value) - float(baseline)) / abs(float(baseline)))
+
+
+def tower_summary(incident_tps: pd.DataFrame, analysis: Any | None = None) -> tuple[str, dict[str, list[str]]]:
+    if analysis is not None and getattr(analysis, "evidence", None):
+        tower_scores: dict[str, float] = {}
+        towers: dict[str, list[str]] = {}
+        for item in analysis.evidence:
+            tower = str(item.tower)
+            towers.setdefault(tower, []).append(str(item.signal))
+            tower_scores[tower] = max(tower_scores.get(tower, 0.0), float(item.anomaly_score))
+        primary = max(tower_scores, key=tower_scores.get) if tower_scores else "Pending"
+        return primary, towers
+
+    if incident_tps.empty:
+        return "Pending", {}
+
+    towers = {}
+    tower_scores = {}
+    for _, row in incident_tps.iterrows():
+        tower = str(row.get("tower", "unknown"))
+        signal = str(row.get("signal", ""))
+        towers.setdefault(tower, []).append(signal)
+        tower_scores[tower] = max(tower_scores.get(tower, 0.0), _telemetry_anomaly_score(row))
+
+    primary = max(tower_scores, key=tower_scores.get) if tower_scores else "Pending"
+    return primary, towers
+
+
 def dataframe_to_excel_bytes(frame: pd.DataFrame, sheet_name: str) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -199,6 +236,7 @@ def main() -> None:
             active_ids,
             index=default_index,
         )
+        run_rca_clicked = st.button("Run RCA", use_container_width=True)
     if incident_id != st.session_state.selected_incident:
         st.session_state.run_rca = False
         st.session_state.selected_incident = incident_id
@@ -206,34 +244,31 @@ def main() -> None:
     incident = incidents[incidents["incident_id"] == incident_id].iloc[0].to_dict()
     operator_notes = ""
 
-    # Warm static RCA context before the user clicks Run RCA so the first click is faster.
-    _ = cached_reference_sources()
-    _ = cached_dataset_reference_sources()
-    _ = get_cached_vector_store()
-
     if "run_rca" not in st.session_state:
-        st.session_state.run_rca = True  # Auto-run RCA with pre-cached data
+        st.session_state.run_rca = False
+    if "rca_results" not in st.session_state:
+        st.session_state.rca_results = {}
     if "selected_incident" not in st.session_state:
         st.session_state.selected_incident = incident_id
     if incident_id != st.session_state.selected_incident:
-        st.session_state.run_rca = True  # Auto-run on incident change
+        st.session_state.run_rca = False
         st.session_state.selected_incident = incident_id
 
-    # Always run RCA with pre-cached data (data loading now optimized)
-    service = get_rca_service()
     telemetry = cached_telemetry()
     incident_tps = filtered_incident_telemetry(incident, telemetry)
-    reference_sources = load_reference_sources() + load_dataset_reference_sources()
-    dynamic_source = dynamic_reference_source(operator_notes)
-    if dynamic_source:
-        reference_sources = reference_sources + [dynamic_source]
+    cache_key = incident["incident_id"]
+    if run_rca_clicked:
+        st.session_state.run_rca = True
+        service = get_rca_service()
+        with st.spinner("Running RCA..."):
+            st.session_state.rca_results[cache_key] = service.investigate(
+                incident=incident,
+                operator_notes=operator_notes,
+                telemetry=telemetry,
+            )
 
-    agent_result = service.investigate(
-        incident=incident,
-        operator_notes=operator_notes,
-        telemetry=telemetry,
-    )
-    analysis = agent_result.analysis
+    agent_result = st.session_state.rca_results.get(cache_key)
+    analysis = agent_result.analysis if agent_result is not None else None
 
     workflow_tabs = st.tabs(
         [
@@ -255,46 +290,28 @@ def main() -> None:
         else:
             c3.metric("RCA Confidence", "Pending")
 
-        st.write(generate_incident_description(incident, use_vllm=st.session_state.run_rca))
+        st.write(generate_incident_description(incident, use_vllm=False))
 
-        st.markdown("**Affected dependency map**")
-        dependency_df = dependency_map_for_telemetry(incident, incident_tps)
-        if dependency_df.empty:
-            st.info("No dependency data available for the incident window")
-        else:
-            st.dataframe(
-                dependency_df,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        # Display all towers represented in this incident using the flat telemetry table
-        st.markdown("**Towers involved in this incident**")
-        telemetry_df = cached_telemetry()
-        if telemetry_df is None or telemetry_df.empty:
+        st.markdown("**Tower impact**")
+        primary_tower, towers = tower_summary(incident_tps, analysis)
+        if not towers:
             st.info("No tower data available for this incident")
         else:
-            if incident_tps.empty:
-                st.info("No tower data available for this incident")
-            else:
-                towers = {}
-                for _, row in incident_tps.iterrows():
-                    tower = str(row.get("tower", "unknown"))
-                    signal = str(row.get("signal", ""))
-                    towers.setdefault(tower, []).append(signal)
-
-                tower_cols = st.columns(max(1, len(towers)))
-                for col, (tower, signals) in zip(tower_cols, towers.items()):
-                    with col:
-                        st.metric(tower.capitalize(), len(signals))
-                        st.caption(f"Signals: {', '.join(list(dict.fromkeys(signals))[:3])}")
+            c1, c2 = st.columns([1, 2])
+            c1.metric("Primary Tower", primary_tower)
+            c2.metric("Affected Towers", ", ".join(sorted(towers)))
+            tower_cols = st.columns(max(1, len(towers)))
+            for col, (tower, signals) in zip(tower_cols, towers.items()):
+                with col:
+                    st.metric(tower, len(signals))
+                    st.caption(f"Signals: {', '.join(list(dict.fromkeys(signals))[:3])}")
 
     with workflow_tabs[1]:
         st.subheader("Cross-Tower Correlated Evidence")
         st.caption("Anomalies are ranked by time proximity, tower severity, and service dependency relevance.")
 
         if analysis is None:
-            st.info("Computing correlated evidence...")
+            st.info("Run RCA to compute correlated evidence.")
         else:
             evidence_df = pd.DataFrame([item.to_dict() for item in analysis.evidence])
             if not evidence_df.empty:
@@ -311,7 +328,7 @@ def main() -> None:
     with workflow_tabs[2]:
         st.subheader("Human-Readable RCA")
         if analysis is None:
-            st.info("Computing human-readable RCA...")
+            st.info("Run RCA to generate the report.")
         else:
             st.markdown(agent_result.report_markdown)
             st.download_button(
@@ -376,6 +393,7 @@ def main() -> None:
         if analysis is None:
             st.info("Run RCA first to enable feedback submission and incident memory retrieval.")
         else:
+            service = service or get_rca_service()
             with st.form("feedback_form"):
                 is_correct = st.radio(
                     "Was the primary RCA correct?",

@@ -51,6 +51,10 @@ If vLLM is not configured, the app still runs the local agent tool path for stru
 
 The Streamlit UI now displays which grounding source was used for RAG (PDF vs internal fallback).
 
+## Anomaly Detection
+
+Telemetry anomaly scoring is handled by a PyTorch LSTM autoencoder in `src/gpu_anomaly.py`. The detector builds timestamp-ordered sliding windows from the existing multivariate telemetry features (`value`, `baseline`, deltas, ratios, time offset, tower, signal, and component), reconstructs each sequence, and maps sequence reconstruction error back to the row-level `gpu_anomaly_score` consumed by the RCA pipeline. For very short telemetry slices or missing PyTorch, the existing rule-based fallback still produces `gpu_anomaly_score` so downstream RCA contracts remain unchanged.
+
 ## Project Structure
 
 ```text
@@ -63,13 +67,14 @@ src/data_loader.py      OpenRCA and ServiceNow dataset adapter
 src/agents.py           LangChain/vLLM RCA agent and learning orchestration
 src/api.py              FastAPI backend for RCA investigation and feedback
 src/services/rca_service.py  Service layer for incident analysis and feedback workflows
-src/rca_engine.py       Anomaly detection, correlation, hypothesis scoring
+src/gpu_anomaly.py      LSTM autoencoder telemetry anomaly scoring
+src/rca_engine.py       Correlation and hypothesis scoring
 src/incident_memory.py  Feedback persistence and similar incident retrieval
 src/reference_loader.py PDF reference loader
 src/vllm_client.py      vLLM OpenAI-compatible chat client
 src/reporting.py        Human-readable RCA report builder
 data/incident_memory.json
-tests/test_rca_engine.py
+tests/test_gpu_anomaly.py
 ```
 
 ## Demo Focus
