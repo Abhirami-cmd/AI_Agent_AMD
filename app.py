@@ -5,16 +5,16 @@ import re
 from html import escape
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
-from src.data_loader import load_dataset_reference_sources, load_incidents, load_telemetry
-from src.models import FeedbackRequest, ReferenceSource
+from src.data_loader import load_incidents, load_telemetry
+from src.graph_service import TopologyGraphService
+from src.models import FeedbackRequest
 from src.rca_engine import filter_to_incident_window
-from src.reference_loader import dynamic_reference_source, load_reference_sources
-from src.rag import get_vector_store
 from src.services.rca_service import RCAService
 from src.vllm_client import generate_with_vllm, is_vllm_configured
 from typing import Any
@@ -76,25 +76,6 @@ def cached_telemetry() -> pd.DataFrame:
     return load_telemetry()
 
 
-@st.cache_data
-def cached_reference_sources() -> list[dict[str, str]]:
-    return load_reference_sources()
-
-
-@st.cache_data
-def cached_dataset_reference_sources() -> list[dict[str, str]]:
-    return load_dataset_reference_sources()
-
-
-@st.cache_resource
-def get_cached_vector_store() -> Any:
-    store = get_vector_store()
-    reference_sources = cached_reference_sources() + cached_dataset_reference_sources()
-    parsed_sources = [ReferenceSource(**source) for source in reference_sources]
-    store.index_reference_sources(parsed_sources)
-    return store
-
-
 @st.cache_resource
 def get_rca_service() -> RCAService:
     return RCAService()
@@ -111,32 +92,6 @@ def filtered_incident_telemetry(
         return incident_tps
     incident_tps, _ = filter_to_incident_window(incident, incident_tps)
     return incident_tps
-
-
-def dependency_map_for_telemetry(
-    incident: dict[str, Any],
-    incident_tps: pd.DataFrame,
-) -> pd.DataFrame:
-    if incident_tps.empty:
-        return pd.DataFrame()
-
-    rows = []
-    dependency_target = str(incident.get("incident_id") or incident.get("service") or "incident")
-    for _, row in incident_tps.iterrows():
-        timestamp = row.get("timestamp")
-        if hasattr(timestamp, "strftime"):
-            timestamp = timestamp.strftime("%Y-%m-%d %H:%M")
-        rows.append(
-            {
-                "source": str(row.get("component", "")),
-                "dependency": dependency_target,
-                "tower": str(row.get("tower", "unknown")),
-                "signal": str(row.get("signal", "")),
-                "timestamp": str(timestamp),
-            }
-        )
-
-    return pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
 
 
 def _telemetry_anomaly_score(row: pd.Series) -> float:
@@ -174,6 +129,62 @@ def tower_summary(incident_tps: pd.DataFrame, analysis: Any | None = None) -> tu
 
     primary = max(tower_scores, key=tower_scores.get) if tower_scores else "Pending"
     return primary, towers
+
+
+def topology_figure(incident: dict[str, Any], analysis: Any | None = None) -> go.Figure:
+    graph_incident = dict(incident)
+    if analysis is not None and getattr(analysis, "evidence", None):
+        graph_incident["dependencies"] = [
+            {"source": item.component, "dependency": item.signal, "tower": item.tower}
+            for item in analysis.evidence
+        ]
+    graph = TopologyGraphService().build_dependency_graph(graph_incident)
+    if not graph.nodes:
+        return go.Figure()
+
+    import networkx as nx
+
+    positions = nx.spring_layout(graph, seed=7)
+    edge_x = []
+    edge_y = []
+    for source, target in graph.edges():
+        x0, y0 = positions[source]
+        x1, y1 = positions[target]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+
+    node_x = []
+    node_y = []
+    labels = []
+    colors = []
+    for node, attrs in graph.nodes(data=True):
+        x, y = positions[node]
+        node_x.append(x)
+        node_y.append(y)
+        labels.append(str(attrs.get("label", node)))
+        colors.append("#2563eb" if attrs.get("type") == "service" else "#16a34a")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=edge_x, y=edge_y, mode="lines", line=dict(width=1, color="#94a3b8"), hoverinfo="none"))
+    fig.add_trace(
+        go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode="markers+text",
+            text=labels,
+            textposition="top center",
+            marker=dict(size=18, color=colors),
+            hoverinfo="text",
+        )
+    )
+    fig.update_layout(
+        height=320,
+        margin=dict(l=10, r=10, t=20, b=10),
+        showlegend=False,
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+    )
+    return fig
 
 
 def dataframe_to_excel_bytes(frame: pd.DataFrame, sheet_name: str) -> bytes:
@@ -236,7 +247,6 @@ def main() -> None:
             active_ids,
             index=default_index,
         )
-        run_rca_clicked = st.button("Run RCA", use_container_width=True)
     if incident_id != st.session_state.selected_incident:
         st.session_state.run_rca = False
         st.session_state.selected_incident = incident_id
@@ -245,7 +255,7 @@ def main() -> None:
     operator_notes = ""
 
     if "run_rca" not in st.session_state:
-        st.session_state.run_rca = False
+        st.session_state.run_rca = True
     if "rca_results" not in st.session_state:
         st.session_state.rca_results = {}
     if "selected_incident" not in st.session_state:
@@ -257,14 +267,13 @@ def main() -> None:
     telemetry = cached_telemetry()
     incident_tps = filtered_incident_telemetry(incident, telemetry)
     cache_key = incident["incident_id"]
-    if run_rca_clicked:
-        st.session_state.run_rca = True
+    if cache_key not in st.session_state.rca_results:
         service = get_rca_service()
-        with st.spinner("Running RCA..."):
+        with st.spinner("Loading incident RCA..."):
             st.session_state.rca_results[cache_key] = service.investigate(
                 incident=incident,
                 operator_notes=operator_notes,
-                telemetry=telemetry,
+                telemetry=incident_tps,
             )
 
     agent_result = st.session_state.rca_results.get(cache_key)
@@ -306,12 +315,15 @@ def main() -> None:
                     st.metric(tower, len(signals))
                     st.caption(f"Signals: {', '.join(list(dict.fromkeys(signals))[:3])}")
 
+        st.markdown("**Topology correlation**")
+        st.plotly_chart(topology_figure(incident, analysis), use_container_width=True)
+
     with workflow_tabs[1]:
         st.subheader("Cross-Tower Correlated Evidence")
         st.caption("Anomalies are ranked by time proximity, tower severity, and service dependency relevance.")
 
         if analysis is None:
-            st.info("Run RCA to compute correlated evidence.")
+            st.info("Loading correlated evidence...")
         else:
             evidence_df = pd.DataFrame([item.to_dict() for item in analysis.evidence])
             if not evidence_df.empty:
@@ -328,7 +340,7 @@ def main() -> None:
     with workflow_tabs[2]:
         st.subheader("Human-Readable RCA")
         if analysis is None:
-            st.info("Run RCA to generate the report.")
+            st.info("Loading RCA report...")
         else:
             st.markdown(agent_result.report_markdown)
             st.download_button(
@@ -374,7 +386,7 @@ def main() -> None:
         st.caption("The agent shows plausible alternatives so correlation is not presented as certainty.")
 
         if analysis is None:
-            st.info("Run RCA to see alternative hypotheses.")
+            st.info("Loading alternative hypotheses...")
         else:
             for rank, hypothesis in enumerate(analysis.alternatives, start=2):
                 with st.expander(
@@ -391,7 +403,7 @@ def main() -> None:
         st.caption("Engineer validation is stored locally and retrieved for future similar incidents.")
 
         if analysis is None:
-            st.info("Run RCA first to enable feedback submission and incident memory retrieval.")
+            st.info("Loading RCA before enabling feedback.")
         else:
             service = service or get_rca_service()
             with st.form("feedback_form"):

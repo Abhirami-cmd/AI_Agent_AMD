@@ -36,14 +36,14 @@ The RCA workflow uses a LangChain `AgentExecutor` with tools for cross-tower cor
 Start vLLM separately, optimized for MI300x:
 
 ```powershell
-vllm serve meta-llama/Llama-3.1-70B-Instruct --port 8000 --gpu-memory-utilization 0.9
+vllm serve Qwen/Qwen2.5-72B-Instruct --port 8000 --gpu-memory-utilization 0.9
 ```
 
 Then run the app with:
 
 ```powershell
 $env:VLLM_BASE_URL="http://localhost:8000/v1"
-$env:VLLM_MODEL="meta-llama/Llama-3.1-70B-Instruct"
+$env:VLLM_MODEL="Qwen/Qwen2.5-72B-Instruct"
 streamlit run app.py
 ```
 

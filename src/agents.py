@@ -64,6 +64,7 @@ class GPUTimeSeriesAnomalyAgent:
             training_telemetry=training_telemetry,
             epochs=6,
             max_train_sequences=12000,
+            model_cache_path=settings.gpu_anomaly_model_cache_path,
         )
 
 

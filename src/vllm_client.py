@@ -7,7 +7,7 @@ import requests
 
 
 DEFAULT_VLLM_URL = "http://localhost:8000/v1/chat/completions"
-DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen2.5-72B-Instruct"
 
 
 def is_vllm_configured() -> bool:

@@ -6,7 +6,7 @@ from pydantic import Field, field_validator
 
 class Settings(BaseSettings):
     vllm_base_url: str = Field(default="http://localhost:8000/v1", env="VLLM_BASE_URL")
-    vllm_model: str = Field(default="meta-llama/Llama-3.1-70B-Instruct", env="VLLM_MODEL")
+    vllm_model: str = Field(default="Qwen/Qwen2.5-72B-Instruct", env="VLLM_MODEL")
     vllm_api_key: str = Field(default="", env="VLLM_API_KEY")
     use_vllm: bool = Field(default=False, env="USE_VLLM")
     chroma_persist_dir: str = Field(default="data/chroma", env="CHROMA_PERSIST_DIR")
@@ -22,6 +22,10 @@ class Settings(BaseSettings):
         env="CROSS_TOWER_DUPLICATE_SUPPRESSION_MINUTES",
     )
     cross_tower_max_candidates: int = Field(default=5, env="CROSS_TOWER_MAX_CANDIDATES")
+    gpu_anomaly_model_cache_path: str = Field(
+        default="data/models/lstm_autoencoder.pt",
+        env="GPU_ANOMALY_MODEL_CACHE_PATH",
+    )
     openrca_cloudbed1_query_path: str = Field(
         default="data/openrca/market_cloudbed_1/query.csv",
         env="OPENRCA_CLOUDBED1_QUERY_PATH",

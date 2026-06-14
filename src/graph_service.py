@@ -41,3 +41,4 @@ class TopologyGraphService:
             "service": incident.get("service"),
             "graph": self.serialize_graph(graph),
         }
+        

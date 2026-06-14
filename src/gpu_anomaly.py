@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,7 @@ def enrich_with_gpu_anomaly_scores(
     sequence_length: int = DEFAULT_SEQUENCE_LENGTH,
     max_train_sequences: int = DEFAULT_MAX_TRAIN_SEQUENCES,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    model_cache_path: str | None = None,
 ) -> tuple[pd.DataFrame, GPUAnomalyMetadata]:
     if telemetry.empty:
         return telemetry.copy(), GPUAnomalyMetadata(
@@ -113,25 +115,42 @@ def enrich_with_gpu_anomaly_scores(
         shuffle=True,
         generator=torch.Generator().manual_seed(7),
     )
-    model = _LSTMAutoencoder(
-        feature_size=train_tensor.shape[2],
-        hidden_size=max(32, min(128, train_tensor.shape[2] * 4)),
-    ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    loss_fn = nn.MSELoss()
-
     started_at = time.perf_counter()
-    model.train()
-    for epoch in range(epochs):
-        for (batch,) in train_loader:
-            batch = batch.to(device)
-            optimizer.zero_grad()
-            reconstructed = model(batch)
-            loss = loss_fn(reconstructed, batch)
-            loss.backward()
-            optimizer.step()
-            if (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch + 1}: loss={loss.item():.6f}")
+    feature_size = train_tensor.shape[2]
+    hidden_size = max(32, min(128, feature_size * 4))
+    model = _LSTMAutoencoder(feature_size=feature_size, hidden_size=hidden_size).to(device)
+    cache_status = _load_cached_model(
+        model=model,
+        model_cache_path=model_cache_path,
+        feature_columns=list(train_features.columns),
+        feature_size=feature_size,
+        hidden_size=hidden_size,
+        device=device,
+        torch_module=torch,
+    )
+    if cache_status is None:
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        loss_fn = nn.MSELoss()
+
+        model.train()
+        for epoch in range(epochs):
+            for (batch,) in train_loader:
+                batch = batch.to(device)
+                optimizer.zero_grad()
+                reconstructed = model(batch)
+                loss = loss_fn(reconstructed, batch)
+                loss.backward()
+                optimizer.step()
+                if (epoch + 1) % 10 == 0:
+                    print(f"Epoch {epoch + 1}: loss={loss.item():.6f}")
+        _save_cached_model(
+            model=model,
+            model_cache_path=model_cache_path,
+            feature_columns=list(train_features.columns),
+            feature_size=feature_size,
+            hidden_size=hidden_size,
+            torch_module=torch,
+        )
     training_duration = time.perf_counter() - started_at
 
     model.eval()
@@ -167,7 +186,7 @@ def enrich_with_gpu_anomaly_scores(
         model="lstm-autoencoder",
         rows_scored=len(enriched),
         enabled=True,
-        reason="",
+        reason=cache_status or "",
         sequence_count=train_sequence_count,
         training_sequence_count=len(train_sequences),
         scoring_sequence_count=len(score_sequences),
@@ -207,8 +226,63 @@ class _LSTMAutoencoder:
     def parameters(self):
         return self._model.parameters()
 
+    def state_dict(self):
+        return self._model.state_dict()
+
+    def load_state_dict(self, state_dict):
+        return self._model.load_state_dict(state_dict)
+
     def __call__(self, batch):
         return self._model(batch)
+
+
+def _load_cached_model(
+    model: _LSTMAutoencoder,
+    model_cache_path: str | None,
+    feature_columns: list[str],
+    feature_size: int,
+    hidden_size: int,
+    device,
+    torch_module,
+) -> str | None:
+    if not model_cache_path:
+        return None
+    path = Path(model_cache_path)
+    if not path.exists():
+        return None
+    try:
+        checkpoint = torch_module.load(path, map_location=device)
+    except Exception:
+        return None
+    if checkpoint.get("feature_columns") != feature_columns:
+        return None
+    if checkpoint.get("feature_size") != feature_size or checkpoint.get("hidden_size") != hidden_size:
+        return None
+    model.load_state_dict(checkpoint["state_dict"])
+    return f"loaded cached model from {path}"
+
+
+def _save_cached_model(
+    model: _LSTMAutoencoder,
+    model_cache_path: str | None,
+    feature_columns: list[str],
+    feature_size: int,
+    hidden_size: int,
+    torch_module,
+) -> None:
+    if not model_cache_path:
+        return
+    path = Path(model_cache_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch_module.save(
+        {
+            "state_dict": model.state_dict(),
+            "feature_columns": feature_columns,
+            "feature_size": feature_size,
+            "hidden_size": hidden_size,
+        },
+        path,
+    )
 
 
 def _build_feature_frame(telemetry: pd.DataFrame) -> pd.DataFrame:
