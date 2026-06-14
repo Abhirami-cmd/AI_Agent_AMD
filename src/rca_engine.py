@@ -28,6 +28,8 @@ class EvidenceItem:
     anomaly_score: float
     timestamp: str
     explanation: str
+    causal_score: float = 0.0
+    role: str = "symptom"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +41,8 @@ class EvidenceItem:
             "anomaly_score": round(self.anomaly_score, 2),
             "timestamp": self.timestamp,
             "explanation": self.explanation,
+            "causal_score": round(self.causal_score, 2),
+            "role": self.role,
         }
 
 
@@ -57,7 +61,8 @@ class RCAAnalysis:
     primary: Hypothesis
     alternatives: list[Hypothesis]
     evidence: list[EvidenceItem]
-    similar_incidents: list[dict[str, Any]]
+    similar_incidents: list[dict[str, Any]] = field(default_factory=list)
+    causal_chain: list[EvidenceItem] = field(default_factory=list)
 
 
 def analyze_incident(
@@ -69,7 +74,10 @@ def analyze_incident(
     incident_telemetry = telemetry[telemetry["incident_id"] == incident["incident_id"]].copy()
     incident_telemetry, anchor_time = filter_to_incident_window(incident, incident_telemetry)
     evidence = detect_anomalies(incident_telemetry, anchor_time)
-    
+    evidence = _calculate_causal_scores(evidence)
+    evidence = _assign_roles(evidence)
+    causal_chain = list(evidence)
+
     # Detect multi-tower scenarios for enhanced analysis
     towers_involved = set(item.tower for item in evidence)
     multi_tower_boost = 1.0 + (0.1 * (len(towers_involved) - 1)) if len(towers_involved) > 1 else 1.0
@@ -94,6 +102,7 @@ def analyze_incident(
         alternatives=hypotheses[1:],
         evidence=evidence,
         similar_incidents=similar_incidents,
+        causal_chain=causal_chain,
     )
 
 
@@ -140,6 +149,66 @@ def detect_anomalies(
 
     ranked = sorted(evidence, key=lambda pair: (pair[0], -pair[1].anomaly_score))
     return [item for _, item in ranked[:10]]
+
+
+def _calculate_causal_scores(
+    evidence: list[EvidenceItem],
+) -> list[EvidenceItem]:
+    if not evidence:
+        return evidence
+
+    tower_count = max(1, len({item.tower for item in evidence}))
+    max_anomaly_score = max(item.anomaly_score for item in evidence) or 1.0
+    max_magnitude = max(
+        abs(item.observed - item.baseline) / max(abs(item.baseline), 1.0)
+        for item in evidence
+    ) or 1.0
+    timestamps = [pd.to_datetime(item.timestamp, errors="coerce") for item in evidence]
+    min_timestamp = min(ts for ts in timestamps if not pd.isna(ts))
+    max_timestamp = max(ts for ts in timestamps if not pd.isna(ts))
+    time_span = max(1.0, (max_timestamp - min_timestamp).total_seconds())
+
+    for item, timestamp in zip(evidence, timestamps):
+        if pd.isna(timestamp):
+            temporal_priority = 0.0
+        else:
+            age_seconds = (timestamp - min_timestamp).total_seconds()
+            temporal_priority = 1.0 - min(age_seconds / time_span, 1.0)
+
+        magnitude_priority = min(
+            abs(item.observed - item.baseline) / max(abs(item.baseline), 1.0) / max_magnitude,
+            1.0,
+        )
+        normalized_anomaly = min(item.anomaly_score / max_anomaly_score, 1.0)
+        tower_factor = min(tower_count / 5.0, 1.0)
+
+        item.causal_score = (
+            normalized_anomaly * 0.55
+            + tower_factor * 0.20
+            + temporal_priority * 0.15
+            + magnitude_priority * 0.10
+        )
+
+    return sorted(
+        evidence,
+        key=lambda item: (item.causal_score, -item.anomaly_score),
+        reverse=True,
+    )
+
+
+def _assign_roles(evidence: list[EvidenceItem]) -> list[EvidenceItem]:
+    if not evidence:
+        return evidence
+
+    top_score = evidence[0].causal_score
+    for index, item in enumerate(evidence):
+        if index == 0:
+            item.role = "root_cause"
+        elif item.causal_score >= top_score * 0.60:
+            item.role = "propagation"
+        else:
+            item.role = "symptom"
+    return evidence
 
 
 def filter_to_incident_window(

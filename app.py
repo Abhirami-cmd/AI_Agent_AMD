@@ -144,7 +144,7 @@ def topology_figure(incident: dict[str, Any], analysis: Any | None = None) -> go
 
     import networkx as nx
 
-    positions = nx.spring_layout(graph, seed=7)
+    positions = nx.spring_layout(graph, seed=7, k=0.8, iterations=80)
     edge_x = []
     edge_y = []
     for source, target in graph.edges():
@@ -153,36 +153,108 @@ def topology_figure(incident: dict[str, Any], analysis: Any | None = None) -> go
         edge_x.extend([x0, x1, None])
         edge_y.extend([y0, y1, None])
 
-    node_x = []
-    node_y = []
-    labels = []
-    colors = []
+    root_service = incident.get("service", "unknown-service")
+    impacted_towers = {item.tower for item in analysis.evidence} if analysis is not None and getattr(analysis, "evidence", None) else set()
+
+    root_x = []
+    root_y = []
+    root_text = []
+    impacted_x = []
+    impacted_y = []
+    impacted_text = []
+    impacted_label = []
+    impacted_size = []
+    normal_x = []
+    normal_y = []
+    normal_text = []
+    normal_label = []
+    normal_size = []
+
     for node, attrs in graph.nodes(data=True):
         x, y = positions[node]
-        node_x.append(x)
-        node_y.append(y)
-        labels.append(str(attrs.get("label", node)))
-        colors.append("#2563eb" if attrs.get("type") == "service" else "#16a34a")
+        node_label = str(attrs.get("label", node))
+        tower = attrs.get("tower", "unknown")
+        node_type = attrs.get("type", "dependency")
+        hover_text = f"{node_label}<br>tower={tower}<br>type={node_type}"
+
+        if node == root_service:
+            root_x.append(x)
+            root_y.append(y)
+            root_text.append(hover_text)
+            continue
+
+        if tower in impacted_towers:
+            impacted_x.append(x)
+            impacted_y.append(y)
+            impacted_text.append(hover_text)
+            impacted_label.append(node_label)
+            impacted_size.append(28 if node_type == "service" else 24)
+            continue
+
+        normal_x.append(x)
+        normal_y.append(y)
+        normal_text.append(hover_text)
+        normal_label.append(node_label)
+        normal_size.append(24 if node_type == "service" else 20)
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=edge_x, y=edge_y, mode="lines", line=dict(width=1, color="#94a3b8"), hoverinfo="none"))
     fig.add_trace(
         go.Scatter(
-            x=node_x,
-            y=node_y,
-            mode="markers+text",
-            text=labels,
-            textposition="top center",
-            marker=dict(size=18, color=colors),
-            hoverinfo="text",
+            x=edge_x,
+            y=edge_y,
+            mode="lines",
+            line=dict(width=1.5, color="#94a3b8", shape="spline"),
+            hoverinfo="none",
+            showlegend=False,
         )
     )
+
+    dependency_x = normal_x + impacted_x
+    dependency_y = normal_y + impacted_y
+    dependency_text = normal_text + impacted_text
+    dependency_label = normal_label + impacted_label
+    dependency_size = normal_size + impacted_size
+
+    if dependency_x:
+        fig.add_trace(
+            go.Scatter(
+                x=dependency_x,
+                y=dependency_y,
+                mode="markers+text",
+                text=dependency_label,
+                textposition="bottom center",
+                hovertext=dependency_text,
+                hoverinfo="text",
+                marker=dict(size=dependency_size, color="#38bdf8", line=dict(width=2, color="#0f172a")),
+                showlegend=False,
+            )
+        )
+
+    if root_x:
+        fig.add_trace(
+            go.Scatter(
+                x=root_x,
+                y=root_y,
+                mode="markers+text",
+                text=[root_service],
+                textposition="top center",
+                hovertext=root_text,
+                hoverinfo="text",
+                marker=dict(size=40, color="#0f172a", symbol="diamond", line=dict(width=2, color="#475569")),
+                name="Incident service",
+                showlegend=True,
+            )
+        )
+
     fig.update_layout(
-        height=320,
-        margin=dict(l=10, r=10, t=20, b=10),
-        showlegend=False,
+        height=520,
+        margin=dict(l=20, r=20, t=20, b=80),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="right", x=1.0),
         xaxis=dict(visible=False),
         yaxis=dict(visible=False),
+        plot_bgcolor="#f8fafc",
+        hovermode="closest",
     )
     return fig
 
@@ -286,6 +358,7 @@ def main() -> None:
             "3. RCA",
             "4. Alternatives",
             "5. Feedback",
+            "6. Topology",
         ]
     )
 
@@ -315,9 +388,6 @@ def main() -> None:
                     st.metric(tower, len(signals))
                     st.caption(f"Signals: {', '.join(list(dict.fromkeys(signals))[:3])}")
 
-        st.markdown("**Topology correlation**")
-        st.plotly_chart(topology_figure(incident, analysis), use_container_width=True)
-
     with workflow_tabs[1]:
         st.subheader("Cross-Tower Correlated Evidence")
         st.caption("Anomalies are ranked by time proximity, tower severity, and service dependency relevance.")
@@ -338,7 +408,6 @@ def main() -> None:
                 st.info("No correlated evidence found for this incident.")
 
     with workflow_tabs[2]:
-        st.subheader("Human-Readable RCA")
         if analysis is None:
             st.info("Loading RCA report...")
         else:
@@ -461,6 +530,11 @@ def main() -> None:
                 "- **Incorrect feedback** penalizes the agent's predicted root cause by -8%.\n"
                 "- Feedback is stored as incident memory and influences future RCA ranking for similar service incidents."
             )
+
+    with workflow_tabs[5]:
+        st.subheader("Topology")
+        st.caption("Layered Application/Compute/Network topology with impacted towers highlighted and RCA annotations.")
+        st.plotly_chart(topology_figure(incident, analysis), use_container_width=True)
 
 
 if __name__ == "__main__":

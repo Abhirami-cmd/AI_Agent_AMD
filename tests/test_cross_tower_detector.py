@@ -125,6 +125,13 @@ class CrossTowerDetectorTests(unittest.TestCase):
         self.assertIsInstance(analysis, RCAAnalysis)
         self.assertGreaterEqual(len(analysis.evidence), 2)
         self.assertIn("Cross-tower corroboration", " ".join(analysis.primary.confidence_drivers))
+        self.assertTrue(hasattr(analysis, "causal_chain"))
+        self.assertGreaterEqual(len(analysis.causal_chain), 2)
+        self.assertEqual(analysis.causal_chain[0].role, "root_cause")
+        self.assertTrue(
+            any(item.role in {"propagation", "symptom"} for item in analysis.causal_chain[1:])
+            or len(analysis.causal_chain) == 1
+        )
 
 
 if __name__ == "__main__":
