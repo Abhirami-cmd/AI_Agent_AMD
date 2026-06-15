@@ -15,9 +15,9 @@ from src.ingest.openrca_loader import (
     load_openrca_telemetry_aggregated,
 )
 from src.ingest.preprocessing import merge_datasets
-from src.ingest.servicenow_loader import load_servicenow_incidents
 from src.ingest.synthetic_loader import (
     load_synthetic_incidents,
+    load_synthetic_memory_records,
     load_synthetic_telemetry,
     synthetic_dataset_statistics,
 )
@@ -50,8 +50,8 @@ def load_telemetry_dataset_statistics(metadata: dict[str, object] | None = None)
     return synthetic_dataset_statistics(load_telemetry(), metadata)
 
 
-def load_servicenow_memory_records() -> list[MemoryRecord]:
-    return _load_servicenow_memory_records()
+def load_incident_memory_records() -> list[MemoryRecord]:
+    return _load_incident_memory_records()
 
 
 def load_dataset_reference_sources() -> list[dict[str, str]]:
@@ -143,11 +143,11 @@ def load_real_datasets() -> tuple[list[Incident], list[TelemetryPoint], list[Mem
 
 
 @lru_cache(maxsize=1)
-def _load_servicenow_memory_records() -> list[MemoryRecord]:
-    servicenow_incidents, servicenow_memory = load_servicenow_incidents(settings.servicenow_path)
-    if not servicenow_incidents:
-        logger.warning("No ServiceNow incidents were loaded from %s", settings.servicenow_path)
-    return servicenow_memory
+def _load_incident_memory_records() -> list[MemoryRecord]:
+    records = load_synthetic_memory_records(settings.synthetic_memory_path)
+    if not records:
+        logger.warning("No synthetic incident memory records were loaded from %s", settings.synthetic_memory_path)
+    return records
 
 
 def _incidents_to_frame(incidents: list[Incident]) -> pd.DataFrame:

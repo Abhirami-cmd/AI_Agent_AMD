@@ -10,7 +10,7 @@ from src.agents import UnifiedRCAAgent
 from src.data_loader import (
     load_dataset_reference_sources,
     load_incidents,
-    load_servicenow_memory_records,
+    load_incident_memory_records,
     load_telemetry,
 )
 from src.graph_service import TopologyGraphService
@@ -122,5 +122,5 @@ class RCAService:
     def _ensure_memory_seeded(self) -> None:
         if self._memory_seeded:
             return
-        self.memory.seed_records(load_servicenow_memory_records())
+        self.memory.seed_records(load_incident_memory_records())
         self._memory_seeded = True

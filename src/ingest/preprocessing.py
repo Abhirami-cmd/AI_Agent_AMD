@@ -94,7 +94,7 @@ def _normalize_timestamp(timestamp_str: str) -> str:
 
     Handles multiple input formats:
     - ISO format: already valid
-    - DD/MM/YYYY HH:MM: ServiceNow format
+    - DD/MM/YYYY HH:MM
     - Other formats: attempt parsing
     """
     if not timestamp_str or timestamp_str == "?":
@@ -104,7 +104,7 @@ def _normalize_timestamp(timestamp_str: str) -> str:
     formats = [
         "%Y-%m-%d %H:%M:%S",  # ISO
         "%Y-%m-%d %H:%M",  # ISO short
-        "%d/%m/%Y %H:%M",  # ServiceNow
+        "%d/%m/%Y %H:%M",
         "%Y-%m-%dT%H:%M:%S",  # ISO with T
     ]
 
@@ -185,7 +185,7 @@ def _telemetry_dedupe_key(point: TelemetryPoint) -> tuple:
 def merge_datasets(
     openrca_incidents: list[Incident],
     openrca_telemetry: list[TelemetryPoint],
-    servicenow_incidents: list[Incident],
+    extra_incidents: list[Incident],
 ) -> tuple[list[Incident], list[TelemetryPoint]]:
     """
     Merge incidents and telemetry from multiple sources.
@@ -193,7 +193,7 @@ def merge_datasets(
     Returns:
         Tuple of (all_incidents, all_telemetry) with duplicates removed.
     """
-    all_incidents = openrca_incidents + servicenow_incidents
+    all_incidents = openrca_incidents + extra_incidents
     all_incidents = deduplicate_incidents(all_incidents)
     all_incidents = preprocess_incidents(all_incidents)
 

@@ -309,7 +309,7 @@ Continuous learning will be implemented as a practical feedback-driven improveme
 - Use graph-based causal inference.
 - Add online learning for anomaly thresholds.
 - Learn service-specific baselines automatically.
-- Integrate ITSM closure notes from ServiceNow or Jira.
+- Integrate ITSM closure notes from external systems when production connectors are added.
 
 ## 11. Agent Design
 

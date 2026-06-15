@@ -58,10 +58,6 @@ class Settings(BaseSettings):
         default="data/openrca/telemetry/record.csv",
         env="OPENRCA_TELEMETRY_RECORD_PATH",
     )
-    servicenow_path: str = Field(
-        default="data/servicenow/incident_event_log.csv",
-        env="SERVICENOW_PATH",
-    )
     synthetic_train_path: str = Field(
         default="data/synthetic_telemetry/synthetic_train.csv",
         env="SYNTHETIC_TRAIN_PATH",
@@ -73,6 +69,10 @@ class Settings(BaseSettings):
     synthetic_metadata_path: str = Field(
         default="data/synthetic_telemetry/anomaly_metadata.csv",
         env="SYNTHETIC_METADATA_PATH",
+    )
+    synthetic_memory_path: str = Field(
+        default="data/synthetic_telemetry/incident_memory.csv",
+        env="SYNTHETIC_MEMORY_PATH",
     )
 
     @field_validator("debug", mode="before")

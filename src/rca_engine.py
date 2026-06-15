@@ -16,6 +16,8 @@ SEVERITY_PROXIMITY_WINDOWS = {
     "low": pd.Timedelta(minutes=5),
 }
 DEFAULT_PROXIMITY_WINDOW = pd.Timedelta(minutes=5)
+MAX_PRIMARY_CONFIDENCE = 0.92
+MAX_ALTERNATIVE_CONFIDENCE = 0.84
 
 
 @dataclass
@@ -54,6 +56,7 @@ class Hypothesis:
     confidence_drivers: list[str] = field(default_factory=list)
     rejection_reasons: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
+    score_factors: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -78,28 +81,17 @@ def analyze_incident(
     evidence = _assign_roles(evidence)
     causal_chain = list(evidence)
 
-    # Detect multi-tower scenarios for enhanced analysis
-    towers_involved = set(item.tower for item in evidence)
-    multi_tower_boost = 1.0 + (0.1 * (len(towers_involved) - 1)) if len(towers_involved) > 1 else 1.0
-    
     similar_incidents = memory.find_similar(
         service=incident["service"],
         evidence_terms=[item.signal for item in evidence],
     )
     hypotheses = score_hypotheses(incident, evidence, similar_incidents, reference_sources or [])
-    
-    # Boost confidence for hypotheses when multiple towers corroborate
-    if len(towers_involved) > 1:
-        for hyp in hypotheses:
-            hyp.confidence = min(0.99, hyp.confidence * multi_tower_boost)
-            hyp.confidence_drivers.append(
-                f"Cross-tower corroboration: anomalies detected in {len(towers_involved)} towers ({', '.join(sorted(towers_involved))})."
-            )
-    
+
+    MAX_ALTERNATIVES = 4
     hypotheses = sorted(hypotheses, key=lambda item: item.confidence, reverse=True)
     return RCAAnalysis(
         primary=hypotheses[0],
-        alternatives=hypotheses[1:],
+        alternatives=hypotheses[1:MAX_ALTERNATIVES+1],
         evidence=evidence,
         similar_incidents=similar_incidents,
         causal_chain=causal_chain,
@@ -296,14 +288,20 @@ def score_hypotheses(
         similar_incidents,
         reference_sources or [],
     )
-    if rag_hypotheses:
-        return rag_hypotheses
-
     memory_hypotheses = _score_memory_hypotheses(evidence, similar_incidents)
-    if memory_hypotheses:
-        return memory_hypotheses
 
-    return _no_reference_hypothesis(evidence)
+    all_hypotheses = _merge_duplicate_hypotheses(rag_hypotheses + memory_hypotheses)
+    if not all_hypotheses:
+        return _no_reference_hypothesis(evidence)
+
+    all_hypotheses = _apply_weighted_confidence(
+        incident,
+        evidence,
+        all_hypotheses,
+        similar_incidents,
+    )
+    all_hypotheses = _apply_confidence_caps(all_hypotheses)
+    return sorted(all_hypotheses, key=lambda h: h.confidence, reverse=True)
 
 
 def _score_reference_hypotheses(
@@ -313,36 +311,49 @@ def _score_reference_hypotheses(
 ) -> list[Hypothesis]:
     query_terms = []
     for item in evidence:
-        query_terms.extend([item.tower, item.signal, item.component, item.explanation])
+        query_terms.extend([item.tower, item.signal, item.component])
 
     # Use Chroma vector DB for semantic search
     known_issues = retrieve_known_issues(reference_sources=reference_sources, query_terms=query_terms)
     if not known_issues:
         return []
-
-    max_score = max(issue["score"] for issue in known_issues) or 1
-    hypotheses = []
+    clusters = {}
     for issue in known_issues:
-        confidence = _bounded(0.35 + (issue["score"] / max_score) * 0.45)
-        matched_evidence = _matching_evidence(issue["body"], evidence)
+        key = issue["title"].lower().strip()
+        #key = issue["title"].split(":")[0]  # simple semantic bucket
+        clusters.setdefault(key, []).append(issue)
+
+    #max_score = max(issue["score"] for issue in known_issues) or 1
+    hypotheses = []
+   
+    for cluster_name, items in clusters.items():
+        #best = max(items, key=lambda x: x["score"])
+        best = max(items, key=lambda x: x.get("score", 0))
+
+        rag_similarity = _bounded(float(best.get("score", 0.0)), floor=0.0)
+
         hypotheses.append(
             Hypothesis(
-                title=issue["title"],
-                summary=f"{issue['body']} Source: {issue['source']}.",
-                confidence=confidence,
+                title=best["title"],
+                summary=best["body"],
+                confidence=0.0,
                 confidence_drivers=[
-                    "Retrieved from Chroma vector database via semantic RAG.",
-                    "Ranked by vector similarity with anomalous tower signals and components.",
+                    "Clustered RCA hypothesis from distinct failure group.",
                 ],
                 rejection_reasons=[
-                    "Ranked lower when vector similarity or evidence match is weaker.",
-                    "Requires operator validation before declaring causation.",
+                    "Alternative hypothesis selected from different failure cluster.",
                 ],
-                evidence_refs=matched_evidence,
+                evidence_refs=_matching_evidence(best["body"], evidence),
+                score_factors={"rag_similarity": rag_similarity},
             )
         )
+    return sorted(
+        hypotheses,
+        key=lambda h: h.confidence,
+        reverse=True
+    )[:4]
 
-    return _apply_feedback_learning(hypotheses, similar_incidents)
+    
 
 
 def _matching_evidence(issue_text: str, evidence: list[EvidenceItem]) -> list[str]:
@@ -357,6 +368,39 @@ def _matching_evidence(issue_text: str, evidence: list[EvidenceItem]) -> list[st
     return matches or [item.explanation for item in evidence[:3]]
 
 
+def _merge_duplicate_hypotheses(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+    merged: dict[str, Hypothesis] = {}
+    for hypothesis in hypotheses:
+        key = hypothesis.title.strip().lower()
+        if key not in merged:
+            merged[key] = hypothesis
+            continue
+
+        existing = merged[key]
+        existing.confidence = max(existing.confidence, hypothesis.confidence)
+        existing.confidence_drivers = _unique(existing.confidence_drivers + hypothesis.confidence_drivers)
+        existing.rejection_reasons = _unique(existing.rejection_reasons + hypothesis.rejection_reasons)
+        existing.evidence_refs = _unique(existing.evidence_refs + hypothesis.evidence_refs)
+        existing.score_factors = _merge_score_factors(existing.score_factors, hypothesis.score_factors)
+        if len(hypothesis.summary) > len(existing.summary):
+            existing.summary = hypothesis.summary
+    return list(merged.values())
+
+
+def _unique(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(items))
+
+
+def _merge_score_factors(
+    first: dict[str, float],
+    second: dict[str, float],
+) -> dict[str, float]:
+    merged = dict(first)
+    for key, value in second.items():
+        merged[key] = max(float(merged.get(key, 0.0)), float(value))
+    return merged
+
+
 def _score_memory_hypotheses(
     evidence: list[EvidenceItem],
     similar_incidents: list[dict[str, Any]],
@@ -366,18 +410,19 @@ def _score_memory_hypotheses(
 
     counts: dict[str, dict[str, Any]] = {}
     for incident in similar_incidents:
-        selected = incident.get("selected_root_cause", "Unknown")
-        correctness = incident.get("correctness", "")
-        if selected not in counts:
-            counts[selected] = {"count": 0, "score": 0.0, "correctness": []}
-        counts[selected]["count"] += 1
-        if correctness == "Correct":
-            counts[selected]["score"] += 1.0
-        elif correctness == "Partially correct":
-            counts[selected]["score"] += 0.5
-        else:
-            counts[selected]["score"] += 0.2
-        counts[selected]["correctness"].append(correctness)
+        selected = str(incident.get("selected_root_cause", "")).strip()
+        actual = str(incident.get("actual_root_cause", "") or "").strip()
+        agent_root = str(incident.get("agent_root_cause", "") or "").strip()
+        correctness = str(incident.get("correctness", "")).strip().lower()
+        if correctness == "correct":
+            _add_memory_score(counts, selected, 1.0, incident.get("correctness", ""))
+        elif correctness == "partially correct":
+            _add_memory_score(counts, selected, 0.5, incident.get("correctness", ""))
+        elif correctness == "incorrect":
+            if actual and actual.lower() not in {"other / unknown", "unknown"}:
+                _add_memory_score(counts, actual, 0.8, incident.get("correctness", ""))
+            elif selected and selected.lower() not in {"other / unknown", "unknown"} and selected != agent_root:
+                _add_memory_score(counts, selected, 0.5, incident.get("correctness", ""))
 
     sorted_roots = sorted(
         counts.items(),
@@ -387,7 +432,7 @@ def _score_memory_hypotheses(
 
     hypotheses: list[Hypothesis] = []
     for root_cause, stats in sorted_roots[:3]:
-        confidence = _bounded(0.25 + min(stats["score"], 2.0) * 0.2)
+        memory_support = _bounded(float(stats["score"]) / 2.0, floor=0.0)
         hypotheses.append(
             Hypothesis(
                 title=root_cause,
@@ -395,7 +440,7 @@ def _score_memory_hypotheses(
                     "Historical incident memory suggests this root cause for similar service incidents. "
                     "Use operator validation and current evidence to confirm the candidate."
                 ),
-                confidence=confidence,
+                confidence=0.0,
                 confidence_drivers=[
                     "Derived from similar past incidents with operator feedback.",
                     f"{stats['count']} similar incident(s) matched based on service and evidence terms.",
@@ -405,14 +450,30 @@ def _score_memory_hypotheses(
                     "Verify with current telemetry anomalies before treating it as the only cause.",
                 ],
                 evidence_refs=[item.explanation for item in evidence[:3]],
+                score_factors={"memory_support": memory_support},
             )
         )
 
     return hypotheses
 
 
-def _bounded(value: float) -> float:
-    return max(0.05, min(value, 0.96))
+def _add_memory_score(
+    counts: dict[str, dict[str, Any]],
+    root_cause: str,
+    score: float,
+    correctness: str,
+) -> None:
+    if not root_cause:
+        return
+    if root_cause not in counts:
+        counts[root_cause] = {"count": 0, "score": 0.0, "correctness": []}
+    counts[root_cause]["count"] += 1
+    counts[root_cause]["score"] += score
+    counts[root_cause]["correctness"].append(correctness)
+
+
+def _bounded(value: float, floor: float = 0.05, ceiling: float = 0.96) -> float:
+    return max(floor, min(value, ceiling))
 
 
 def _no_reference_hypothesis(evidence: list[EvidenceItem]) -> list[Hypothesis]:
@@ -428,27 +489,131 @@ def _no_reference_hypothesis(evidence: list[EvidenceItem]) -> list[Hypothesis]:
     ]
 
 
-def _apply_feedback_learning(
+def _apply_weighted_confidence(
+    incident: dict[str, Any],
+    evidence: list[EvidenceItem],
     hypotheses: list[Hypothesis],
     similar_incidents: list[dict[str, Any]],
 ) -> list[Hypothesis]:
     for hypothesis in hypotheses:
-        adjustment = 0.0
-        for incident in similar_incidents:
-            correctness = incident.get("correctness", "")
-            selected = incident.get("selected_root_cause", "")
-            agent_root = incident.get("agent_root_cause", "")
-            if selected == hypothesis.title and correctness == "Correct":
-                adjustment += 0.10
-            elif selected == hypothesis.title and correctness == "Partially correct":
-                adjustment += 0.05
-            elif agent_root == hypothesis.title and correctness == "Incorrect":
-                adjustment -= 0.08
-
-        if adjustment:
-            hypothesis.confidence = _bounded(hypothesis.confidence + adjustment)
-            direction = "boosted" if adjustment > 0 else "reduced"
-            hypothesis.confidence_drivers.append(
-                f"Historical user feedback {direction} this hypothesis by {abs(adjustment):.0%}."
-            )
+        factors = {
+            "rag_similarity": float(hypothesis.score_factors.get("rag_similarity", 0.0)),
+            "evidence_strength": _evidence_strength(hypothesis, evidence),
+            "topology_support": _topology_support(incident, hypothesis, evidence),
+            "memory_support": max(
+                float(hypothesis.score_factors.get("memory_support", 0.0)),
+                _memory_support(hypothesis, similar_incidents),
+            ),
+            "anomaly_severity": _anomaly_severity(evidence),
+        }
+        hypothesis.score_factors = {key: round(value, 4) for key, value in factors.items()}
+        hypothesis.confidence = _bounded(
+            0.35 * factors["rag_similarity"]
+            + 0.25 * factors["evidence_strength"]
+            + 0.20 * factors["topology_support"]
+            + 0.10 * factors["memory_support"]
+            + 0.10 * factors["anomaly_severity"],
+            floor=0.0,
+            ceiling=1.0,
+        )
+        hypothesis.confidence_drivers.append(
+            "Confidence = 0.35*RAG similarity + 0.25*evidence strength + "
+            "0.20*topology support + 0.10*memory support + 0.10*anomaly severity."
+        )
+        hypothesis.confidence_drivers.append(
+            "Score factors: "
+            + ", ".join(f"{key}={value:.2f}" for key, value in factors.items())
+            + "."
+        )
     return hypotheses
+
+
+def _apply_confidence_caps(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+    ranked = sorted(hypotheses, key=lambda h: h.confidence, reverse=True)
+    for index, hypothesis in enumerate(ranked):
+        cap = MAX_PRIMARY_CONFIDENCE if index == 0 else MAX_ALTERNATIVE_CONFIDENCE
+        if hypothesis.confidence > cap:
+            hypothesis.confidence = cap
+            hypothesis.confidence_drivers.append(
+                f"Confidence capped at {cap:.0%} to avoid over-certainty from synthetic or overlapping evidence."
+            )
+    return ranked
+
+
+def _evidence_strength(hypothesis: Hypothesis, evidence: list[EvidenceItem]) -> float:
+    if not evidence:
+        return 0.0
+    refs = {ref.lower() for ref in hypothesis.evidence_refs}
+    matched = [
+        item
+        for item in evidence
+        if not refs
+        or item.explanation.lower() in refs
+        or item.component.lower() in hypothesis.summary.lower()
+        or item.tower.lower() in hypothesis.summary.lower()
+    ]
+    matched = matched or evidence[:3]
+    avg_causal = sum(item.causal_score or item.anomaly_score for item in matched) / len(matched)
+    coverage = len(matched) / len(evidence)
+    return min((avg_causal * 0.65) + (coverage * 0.35), 1.0)
+
+
+def _topology_support(
+    incident: dict[str, Any],
+    hypothesis: Hypothesis,
+    evidence: list[EvidenceItem],
+) -> float:
+    dependencies = incident.get("dependencies") or []
+    if not dependencies and not evidence:
+        return 0.0
+
+    dependency_text = " ".join(
+        " ".join(str(value) for value in dependency.values())
+        for dependency in dependencies
+        if isinstance(dependency, dict)
+    ).lower()
+    hypothesis_text = " ".join([hypothesis.title, hypothesis.summary, *hypothesis.evidence_refs]).lower()
+
+    evidence_towers = {item.tower.lower() for item in evidence}
+    evidence_components = {item.component.lower() for item in evidence}
+    topology_hits = 0
+    for token in evidence_towers | evidence_components:
+        if token and (token in dependency_text or token in hypothesis_text):
+            topology_hits += 1
+
+    coverage_denominator = max(1, len(evidence_towers | evidence_components))
+    coverage = topology_hits / coverage_denominator
+    cross_tower_bonus = min(len(evidence_towers) / 4.0, 1.0)
+    return min((coverage * 0.70) + (cross_tower_bonus * 0.30), 1.0)
+
+
+def _memory_support(
+    hypothesis: Hypothesis,
+    similar_incidents: list[dict[str, Any]],
+) -> float:
+    if not similar_incidents:
+        return 0.0
+
+    support = 0.0
+    title = hypothesis.title.strip().lower()
+    for incident in similar_incidents:
+        correctness = str(incident.get("correctness", "")).strip().lower()
+        selected = str(incident.get("selected_root_cause", "")).strip().lower()
+        actual = str(incident.get("actual_root_cause", "") or "").strip().lower()
+        agent_root = str(incident.get("agent_root_cause", "")).strip().lower()
+        if selected == title and correctness == "correct":
+            support += 1.0
+        elif selected == title and correctness == "partially correct":
+            support += 0.5
+        elif actual == title and correctness == "incorrect":
+            support += 0.8
+        elif agent_root == title and correctness == "incorrect":
+            support -= 0.8
+    return max(0.0, min(support / 2.0, 1.0))
+
+
+def _anomaly_severity(evidence: list[EvidenceItem]) -> float:
+    if not evidence:
+        return 0.0
+    top_scores = sorted((item.anomaly_score for item in evidence), reverse=True)[:3]
+    return min(sum(top_scores) / len(top_scores), 1.0)

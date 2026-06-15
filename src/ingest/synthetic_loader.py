@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.models import MemoryRecord
+
 
 SYNTHETIC_COLUMNS = [
     "incident_id",
@@ -73,6 +75,36 @@ def load_synthetic_incidents(metadata_path: str) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def load_synthetic_memory_records(memory_path: str) -> list[MemoryRecord]:
+    path = Path(memory_path)
+    if not path.exists():
+        return []
+
+    frame = pd.read_csv(path).fillna("")
+    records: list[MemoryRecord] = []
+    for _, row in frame.iterrows():
+        evidence_context = (
+            f"{row.get('evidence_summary', '')} "
+            f"Tower: {row.get('tower', '')}. "
+            f"Component: {row.get('component', '')}. "
+            f"Signal: {row.get('signal', '')}."
+        ).strip()
+        records.append(
+            MemoryRecord(
+                stored_at=str(row.get("stored_at", "")),
+                incident_id=str(row.get("incident_id", "")),
+                service=str(row.get("service", "")),
+                selected_root_cause=str(row.get("selected_root_cause", "")),
+                actual_root_cause=str(row.get("actual_root_cause", "")),
+                agent_root_cause=str(row.get("agent_root_cause", "")),
+                correctness=str(row.get("correctness", "")),
+                notes=str(row.get("notes", "")),
+                evidence_summary=evidence_context,
+            )
+        )
+    return records
 
 
 def synthetic_dataset_statistics(

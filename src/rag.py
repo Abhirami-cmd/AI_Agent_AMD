@@ -16,23 +16,42 @@ def get_vector_store() -> ChromaVectorStore:
 
 
 def retrieve_known_issues(
-    reference_sources: list[dict[str, str]] | None = None,
-    query_terms: list[str] | None = None,
-    query_text: str = "",
-    top_k: int = 4,
+    reference_sources=None,
+    query_terms=None,
+    query_text="",
+    top_k=4,
 ) -> list[dict[str, Any]]:
-    """
-    Retrieve known issues using the Chroma vector store.
-    """
     store = get_vector_store()
+
     if reference_sources:
         parsed_sources = [ReferenceSource(**source) for source in reference_sources]
         store.index_reference_sources(parsed_sources)
 
-    if not query_text and query_terms:
-        query_text = " ".join(query_terms)
+    # 🔥 NEW: build multiple queries instead of one merged query
+    queries = []
 
-    if not query_text:
+    if query_terms:
+        # split structured queries instead of flattening everything
+        for term in query_terms:
+            queries.append(term)
+
+    if query_text:
+        queries.append(query_text)
+
+    if not queries:
         return []
 
-    return store.semantic_search(query_text=query_text, top_k=top_k)
+    # 🔥 retrieve per query
+    all_results = []
+    for q in queries:
+        results = store.semantic_search(query_text=q, top_k=top_k)
+        all_results.extend(results)
+
+    # 🔥 deduplicate by title
+    dedup = {}
+    for r in all_results:
+        key = r.get("title", "")
+        if key not in dedup or r["score"] > dedup[key]["score"]:
+            dedup[key] = r
+
+    return sorted(dedup.values(), key=lambda x: x["score"], reverse=True)[:top_k * 2]

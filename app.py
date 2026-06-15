@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import re
+import time
 from html import escape
 
 import pandas as pd
@@ -142,9 +143,28 @@ def topology_figure(incident: dict[str, Any], analysis: Any | None = None) -> go
     if not graph.nodes:
         return go.Figure()
 
-    import networkx as nx
+    tower_order = ["Application", "Compute", "Network", "Storage", "unknown"]
+    tower_x = {tower: index for index, tower in enumerate(tower_order)}
+    root_service = incident.get("service", "unknown-service")
+    evidence = list(getattr(analysis, "evidence", []) or [])
+    impacted_towers = {item.tower for item in evidence}
+    primary_tower = evidence[0].tower if evidence else None
 
-    positions = nx.spring_layout(graph, seed=7, k=0.8, iterations=80)
+    grouped_nodes: dict[str, list[str]] = {tower: [] for tower in tower_order}
+    for node, attrs in graph.nodes(data=True):
+        if node == root_service:
+            continue
+        tower = str(attrs.get("tower", "unknown"))
+        grouped_nodes.setdefault(tower, []).append(node)
+
+    positions: dict[str, tuple[float, float]] = {root_service: (-0.9, 0.0)}
+    for tower, nodes in grouped_nodes.items():
+        x = tower_x.get(tower, tower_x["unknown"])
+        count = max(1, len(nodes))
+        for index, node in enumerate(sorted(nodes)):
+            y = (count - 1) / 2 - index
+            positions[node] = (x, y)
+
     edge_x = []
     edge_y = []
     for source, target in graph.edges():
@@ -153,29 +173,23 @@ def topology_figure(incident: dict[str, Any], analysis: Any | None = None) -> go
         edge_x.extend([x0, x1, None])
         edge_y.extend([y0, y1, None])
 
-    root_service = incident.get("service", "unknown-service")
-    impacted_towers = {item.tower for item in analysis.evidence} if analysis is not None and getattr(analysis, "evidence", None) else set()
-
     root_x = []
     root_y = []
     root_text = []
-    impacted_x = []
-    impacted_y = []
-    impacted_text = []
-    impacted_label = []
-    impacted_size = []
-    normal_x = []
-    normal_y = []
-    normal_text = []
-    normal_label = []
-    normal_size = []
+    node_x = []
+    node_y = []
+    node_text = []
+    node_label = []
+    node_size = []
+    node_color = []
+    node_line = []
 
     for node, attrs in graph.nodes(data=True):
         x, y = positions[node]
-        node_label = str(attrs.get("label", node))
+        label = str(attrs.get("label", node))
         tower = attrs.get("tower", "unknown")
         node_type = attrs.get("type", "dependency")
-        hover_text = f"{node_label}<br>tower={tower}<br>type={node_type}"
+        hover_text = f"{label}<br>tower={tower}<br>type={node_type}"
 
         if node == root_service:
             root_x.append(x)
@@ -183,19 +197,13 @@ def topology_figure(incident: dict[str, Any], analysis: Any | None = None) -> go
             root_text.append(hover_text)
             continue
 
-        if tower in impacted_towers:
-            impacted_x.append(x)
-            impacted_y.append(y)
-            impacted_text.append(hover_text)
-            impacted_label.append(node_label)
-            impacted_size.append(28 if node_type == "service" else 24)
-            continue
-
-        normal_x.append(x)
-        normal_y.append(y)
-        normal_text.append(hover_text)
-        normal_label.append(node_label)
-        normal_size.append(24 if node_type == "service" else 20)
+        node_x.append(x)
+        node_y.append(y)
+        node_text.append(hover_text)
+        node_label.append(label)
+        node_size.append(30 if tower == primary_tower else 24 if tower in impacted_towers else 18)
+        node_color.append("#ef4444" if tower == primary_tower else "#f59e0b" if tower in impacted_towers else "#38bdf8")
+        node_line.append("#7f1d1d" if tower == primary_tower else "#92400e" if tower in impacted_towers else "#0f172a")
 
     fig = go.Figure()
     fig.add_trace(
@@ -209,24 +217,19 @@ def topology_figure(incident: dict[str, Any], analysis: Any | None = None) -> go
         )
     )
 
-    dependency_x = normal_x + impacted_x
-    dependency_y = normal_y + impacted_y
-    dependency_text = normal_text + impacted_text
-    dependency_label = normal_label + impacted_label
-    dependency_size = normal_size + impacted_size
-
-    if dependency_x:
+    if node_x:
         fig.add_trace(
             go.Scatter(
-                x=dependency_x,
-                y=dependency_y,
+                x=node_x,
+                y=node_y,
                 mode="markers+text",
-                text=dependency_label,
+                text=node_label,
                 textposition="bottom center",
-                hovertext=dependency_text,
+                hovertext=node_text,
                 hoverinfo="text",
-                marker=dict(size=dependency_size, color="#38bdf8", line=dict(width=2, color="#0f172a")),
-                showlegend=False,
+                marker=dict(size=node_size, color=node_color, line=dict(width=2, color=node_line)),
+                name="Affected components",
+                showlegend=True,
             )
         )
 
@@ -251,7 +254,14 @@ def topology_figure(incident: dict[str, Any], analysis: Any | None = None) -> go
         margin=dict(l=20, r=20, t=20, b=80),
         showlegend=True,
         legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="right", x=1.0),
-        xaxis=dict(visible=False),
+        xaxis=dict(
+            visible=True,
+            tickmode="array",
+            tickvals=[tower_x[tower] for tower in tower_order],
+            ticktext=tower_order,
+            showgrid=False,
+            zeroline=False,
+        ),
         yaxis=dict(visible=False),
         plot_bgcolor="#f8fafc",
         hovermode="closest",
@@ -419,7 +429,7 @@ def main() -> None:
                 mime="application/pdf",
             )
 
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             with c1:
                 render_metric_card(
                     "Confidence",
@@ -432,23 +442,6 @@ def main() -> None:
                     str(len(analysis.evidence)),
                     "Structured observations used to support or reject hypotheses.",
                 )
-            with c3:
-                render_metric_card(
-                    "Similar Incidents",
-                    str(len(analysis.similar_incidents)),
-                    "Validated historical incidents retrieved from local memory.",
-                )
-
-            if analysis.similar_incidents:
-                st.markdown("**Historical feedback that influenced this analysis**")
-                feedback_records = pd.DataFrame(analysis.similar_incidents)
-                feedback_cols = [col for col in ['incident_id', 'service', 'selected_root_cause', 'actual_root_cause', 'correctness', 'notes'] if col in feedback_records.columns]
-                st.dataframe(
-                    feedback_records[feedback_cols] if feedback_cols else feedback_records,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                st.caption("These historical incidents matched your current evidence terms and service. Their feedback helped boost or penalize hypotheses.")
 
     with workflow_tabs[3]:
         st.subheader("Alternative Hypotheses")
@@ -475,49 +468,68 @@ def main() -> None:
             st.info("Loading RCA before enabling feedback.")
         else:
             service = service or get_rca_service()
-            with st.form("feedback_form"):
-                is_correct = st.radio(
-                    "Was the primary RCA correct?",
-                    ["Correct", "Partially correct", "Incorrect"],
-                    horizontal=True,
-                )
+            is_correct = st.radio(
+                "Was the primary RCA correct?",
+                ["Correct", "Incorrect"],
+                horizontal=True,
+                index=None,
+            )
+            actual_root_cause = analysis.primary.title
+            other_root_cause = ""
+            if is_correct == "Incorrect":
+                actual_options = [
+                    hypothesis.title
+                    for hypothesis in analysis.alternatives
+                    if hypothesis.title != analysis.primary.title
+                ] + ["Other / unknown"]
                 actual_root_cause = st.selectbox(
                     "Actual root cause",
-                    [analysis.primary.title]
-                    + [hypothesis.title for hypothesis in analysis.alternatives]
-                    + ["Other / unknown"],
+                    actual_options,
+                    index=None,
+                    placeholder="Choose the confirmed root cause...",
                 )
-                other_root_cause = ""
                 if actual_root_cause == "Other / unknown":
                     other_root_cause = st.text_input(
-                        "Confirm actual root cause",
+                        "Root cause",
                         placeholder="Describe the confirmed root cause or failure mode...",
                     )
 
-                notes = st.text_area("Engineer notes", placeholder="Resolution steps, missed evidence, ticket notes...")
-                submitted = st.form_submit_button("Store feedback")
+            notes = st.text_area("Engineer notes", placeholder="Resolution steps, missed evidence, ticket notes...")
+            submitted = st.button("Store feedback", disabled=is_correct is None)
 
             if submitted and service is not None:
                 final_root_cause = other_root_cause.strip() or actual_root_cause
+                if is_correct is None:
+                    st.error("Select Correct or Incorrect before storing feedback.")
+                    st.stop()
+                if is_correct == "Incorrect" and not actual_root_cause:
+                    st.error("Choose the actual root cause before storing incorrect feedback.")
+                    st.stop()
+                if is_correct == "Incorrect" and actual_root_cause == "Other / unknown" and not other_root_cause.strip():
+                    st.error("Enter the root cause before storing incorrect feedback.")
+                    st.stop()
                 service.submit_feedback(
                     FeedbackRequest(
                         incident_id=incident["incident_id"],
                         service=incident["service"],
                         selected_root_cause=final_root_cause,
-                        actual_root_cause=other_root_cause.strip() or None,
+                        actual_root_cause=final_root_cause,
                         correctness=is_correct,
                         notes=notes,
                     )
                 )
+                st.session_state.rca_results.pop(incident["incident_id"], None)
                 st.session_state.closed_incidents.append(incident["incident_id"])
-                st.success("Feedback stored. This incident has been removed from the active list.")
+                st.success("Feedback stored. Refreshing incident list...")
+                time.sleep(2)
+                st.rerun()
 
             if service is not None:
                 st.markdown("**Known incident memory**")
                 memory_records = service.get_memory()
                 if memory_records:
                     memory_df = pd.DataFrame(memory_records)
-                    preferred_cols = ['incident_id', 'service', 'selected_root_cause', 'actual_root_cause', 'agent_root_cause', 'correctness', 'notes']
+                    preferred_cols = ['incident_id', 'service', 'actual_root_cause', 'agent_root_cause', 'correctness', 'notes']
                     cols_to_show = [c for c in preferred_cols if c in memory_df.columns]
                     st.dataframe(memory_df[cols_to_show], use_container_width=True, hide_index=True)
                 else:
@@ -526,7 +538,6 @@ def main() -> None:
             st.markdown("**How learning is applied**")
             st.markdown(
                 "- **Correct feedback** boosts the selected root cause by +10% for similar incidents.\n"
-                "- **Partial feedback** boosts the selected root cause by +5%.\n"
                 "- **Incorrect feedback** penalizes the agent's predicted root cause by -8%.\n"
                 "- Feedback is stored as incident memory and influences future RCA ranking for similar service incidents."
             )

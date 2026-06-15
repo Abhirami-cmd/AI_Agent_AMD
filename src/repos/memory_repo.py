@@ -101,7 +101,7 @@ class JsonIncidentMemoryRepository(IncidentMemoryRepository):
             ).lower()
             if record.service == service or any(term in haystack for term in terms):
                 matches.append(record)
-        return matches[:3]
+        return matches[-10:]
 
 
 class SQLiteIncidentMemoryRepository(IncidentMemoryRepository):
@@ -216,4 +216,4 @@ class SQLiteIncidentMemoryRepository(IncidentMemoryRepository):
             ).lower()
             if record.service == service or any(term in text for term in terms):
                 results.append(record)
-        return results[:3]
+        return results[-10:]
