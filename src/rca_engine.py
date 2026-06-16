@@ -291,6 +291,7 @@ def score_hypotheses(
     memory_hypotheses = _score_memory_hypotheses(evidence, similar_incidents)
 
     all_hypotheses = _merge_duplicate_hypotheses(rag_hypotheses + memory_hypotheses)
+    all_hypotheses = _filter_non_causal_hypotheses(evidence, all_hypotheses)
     if not all_hypotheses:
         return _no_reference_hypothesis(evidence)
 
@@ -385,6 +386,30 @@ def _merge_duplicate_hypotheses(hypotheses: list[Hypothesis]) -> list[Hypothesis
         if len(hypothesis.summary) > len(existing.summary):
             existing.summary = hypothesis.summary
     return list(merged.values())
+
+
+def _filter_non_causal_hypotheses(
+    evidence: list[EvidenceItem],
+    hypotheses: list[Hypothesis],
+) -> list[Hypothesis]:
+    raw_labels = {
+        item.tower.strip().lower()
+        for item in evidence
+        if item.tower
+    } | {
+        item.component.strip().lower()
+        for item in evidence
+        if item.component
+    } | {
+        item.signal.strip().lower()
+        for item in evidence
+        if item.signal
+    }
+    return [
+        hypothesis
+        for hypothesis in hypotheses
+        if hypothesis.title.strip().lower() not in raw_labels
+    ]
 
 
 def _unique(items: list[str]) -> list[str]:

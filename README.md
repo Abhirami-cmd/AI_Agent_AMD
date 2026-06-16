@@ -355,20 +355,6 @@ export CROSS_TOWER_TIME_WINDOW_MINUTES="15"
 export CROSS_TOWER_ANOMALY_SCORE_THRESHOLD="0.65"
 ```
 
-## Tests
-
-### Windows PowerShell
-
-```powershell
-python -m unittest discover tests
-```
-
-### Linux/macOS
-
-```bash
-python -m unittest discover tests
-```
-
 ## Project Structure
 
 ```text
@@ -390,7 +376,6 @@ src/ingest/openrca_loader.py        OpenRCA loaders
 data/synthetic_telemetry/           Synthetic train/live telemetry and memory
 data/openrca/                       OpenRCA reference datasets
 data/reference_runbook.pdf          Default runbook RAG source
-tests/                              Unit tests
 ```
 
 ## Business Value
