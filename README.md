@@ -30,28 +30,57 @@ Modern incidents often span multiple infrastructure towers. A user-facing error 
 ## Architecture
 
 ```text
-Synthetic Telemetry
+Streamlit / FastAPI
         |
         v
-LSTM Autoencoder
-gpu_anomaly_score
+UnifiedRCAAgent
+agent-first incident investigation
+        |
+        +--> GPUTimeSeriesAnomalyAgent
+        |    LSTM autoencoder -> gpu_anomaly_score
+        |
+        +--> CrossTowerAnomalyDetector
+        |    time window + score threshold + tower/component grouping
+        |
+        +--> RCA Engine
+        |    evidence ranking + topology support + confidence scoring
+        |
+        +--> RAG Retrieval
+        |    reference_runbook.pdf + OpenRCA reference patterns
+        |
+        +--> Incident Memory
+        |    feedback-backed historical RCA signals
         |
         v
-Cross-Tower Detector
-time window + score threshold + tower/component grouping
+vLLM on AMD ROCm
+Qwen/Qwen2.5-72B-Instruct grounded RCA report
         |
         v
-RCA Engine
-evidence ranking + topology support + RAG + incident memory
-        |
-        v
-vLLM / Local Report Builder
-human-readable RCA
-        |
-        v
-Engineer Feedback
-synthetic incident memory + future confidence scoring
+LearningAgent
+engineer feedback -> future confidence scoring
 ```
+
+For the AMD ROCm demo environment, vLLM is assumed to be available at runtime through an OpenAI-compatible endpoint. The local deterministic report builder remains as a fallback for development environments.
+
+## Agent Layer
+
+The demo uses a lightweight agent orchestration layer rather than a single prompt call.
+
+| Agent | Purpose |
+| --- | --- |
+| `UnifiedRCAAgent` | Coordinates the end-to-end investigation flow: anomaly scoring, cross-tower correlation, memory retrieval, RCA analysis, and report generation. |
+| `GPUTimeSeriesAnomalyAgent` | Enriches telemetry with `gpu_anomaly_score` using the cached LSTM autoencoder pipeline. |
+| `CrossTowerAnomalyDetector` | Groups anomalies into incident candidates across towers, components, signals, and timestamps. |
+| `LearningAgent` | Stores engineer feedback into incident memory so future similar incidents can adjust confidence. |
+| `LLMOrchestrator` | Builds the grounded RCA report prompt for vLLM and falls back to deterministic Markdown when vLLM is unavailable. |
+
+Supporting modules:
+
+- `src/services/rca_service.py` coordinates app/API calls, reference loading, topology payloads, investigation, and feedback submission.
+- `src/agents.py` defines the RCA agent flow and optional LangChain tool-calling path.
+- `src/vllm_client.py` calls the configured OpenAI-compatible vLLM endpoint, using `Qwen/Qwen2.5-72B-Instruct` by default.
+
+The agent does not invent incident causes directly. It consumes correlated telemetry evidence, topology context, RAG references, and incident memory, then produces a grounded RCA report.
 
 ## Data Sources
 
@@ -86,16 +115,15 @@ data/synthetic_telemetry/incident_memory.csv
 
 This local memory file is used to demonstrate feedback learning without external ITSM dependencies.
 
-### RAG Reference Sources
+### OpenRCA Reference Patterns
 
-The RAG path uses both the local cross-tower runbook PDF and OpenRCA-derived reference patterns:
+OpenRCA data is still used as reference/RAG pattern material:
 
 ```text
-data/reference_runbook.pdf
 data/openrca/
 ```
 
-The PDF provides curated RCA guidance and validation steps. The OpenRCA folder provides historical failure-pattern text. Neither source acts as the live incident telemetry source.
+It helps retrieve known issue patterns but does not act as the live incident telemetry source.
 
 ## Confidence Score Logic
 
@@ -130,15 +158,6 @@ Feedback affects confidence through `memory_support`:
 - `Correct` feedback strengthens the confirmed actual root cause for similar future incidents.
 - `Incorrect` feedback penalizes the previously predicted root cause and uses the user-provided actual root cause for future memory support.
 - The UI currently removes `Partially correct` to keep the feedback model simple.
-
-## LLM Guardrails
-
-The vLLM prompt layer includes lightweight safety rules for demo reliability:
-
-- **Prompt injection defense**: reference documents and operator notes are treated as untrusted input. The model must not follow instructions found inside them.
-- **Evidence grounding**: RCA causes must be supported by telemetry evidence, incident memory, topology, or RAG reference sources.
-- **Weak evidence behavior**: when support is weak, the model should say `insufficient evidence` instead of guessing.
-- **Confidence cap**: primary hypotheses are capped at 92% and alternatives at 84% to avoid unrealistic certainty.
 
 ## RCA Workflow
 
@@ -219,6 +238,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### PyTorch for Anomaly Detection
+
+CPU-only:
+
+```powershell
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+AMD ROCm:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
+```
+
+NVIDIA CUDA:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+```
+
+If PyTorch is not installed, the app still runs and falls back to rule-based anomaly scoring. 
+
 ## Run the Streamlit App
 
 ### Windows PowerShell
@@ -241,6 +282,18 @@ Start vLLM separately.
 
 ```powershell
 vllm serve Qwen/Qwen2.5-72B-Instruct --port 8000 --gpu-memory-utilization 0.9
+
+export VLLM_USE_TRITON_FLASH_ATTN=0
+export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+
+vllm serve Qwen/Qwen2.5-72B-Instruct \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --gpu-memory-utilization 0.60 \
+  --max-model-len 4096 \
+  --max-num-seqs 4 \
+  --tensor-parallel-size 1 \
+  --trust-remote-code
 
 $env:VLLM_BASE_URL="http://localhost:8000/v1"
 $env:VLLM_MODEL="Qwen/Qwen2.5-72B-Instruct"
@@ -362,4 +415,4 @@ For business stakeholders, the application demonstrates how an AI agent can redu
 - RAG quality depends on the reference data available in this repository.
 - The synthetic dataset is useful for demos but not a substitute for production telemetry.
 - Feedback learning is lightweight and local; it is not a full online ML training loop.
-- The topology graph is dependency-oriented and should be extended for production CMDB/service mesh data.
+- The topology graph is dependency-oriented and should be extended for production CMDB/service mesh dataf.

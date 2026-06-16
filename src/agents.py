@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,7 +18,14 @@ from src.gpu_anomaly import GPUAnomalyMetadata, enrich_with_gpu_anomaly_scores
 from src.incident_memory import IncidentMemory
 from src.rca_engine import RCAAnalysis, analyze_incident
 from src.reporting import build_rca_markdown
-from src.vllm_client import is_vllm_configured, vllm_api_key, vllm_base_url, vllm_model
+from src.vllm_client import (
+    consume_token_usage,
+    is_vllm_configured,
+    reset_token_usage,
+    vllm_api_key,
+    vllm_base_url,
+    vllm_model,
+)
 
 
 @dataclass
@@ -25,6 +33,9 @@ class AgentResult:
     analysis: RCAAnalysis
     report_markdown: str
     agent_trace: list[str]
+    token_usage: dict[str, Any]
+    latency_ms: float
+    stage_latencies_ms: dict[str, float]
 
 
 class LearningAgent:
@@ -83,13 +94,20 @@ class UnifiedRCAAgent:
         telemetry: pd.DataFrame,
         reference_sources: list[dict[str, str]],
     ) -> AgentResult:
+        started_at = time.perf_counter()
+        reset_token_usage()
         trace = ["Accepted incident context"]
         if is_vllm_configured():
             result = self._run_langchain_agent(incident, telemetry, reference_sources)
             if result is not None:
+                result.latency_ms = _elapsed_ms(started_at)
+                result.token_usage = consume_token_usage()
                 return result
 
-        return self._run_local_agent(incident, telemetry, reference_sources, trace)
+        result = self._run_local_agent(incident, telemetry, reference_sources, trace)
+        result.latency_ms = _elapsed_ms(started_at)
+        result.token_usage = consume_token_usage()
+        return result
 
     def _run_local_agent(
         self,
@@ -99,11 +117,20 @@ class UnifiedRCAAgent:
         trace: list[str] | None = None,
     ) -> AgentResult:
         trace = trace or ["Accepted incident context"]
+        stage_latencies: dict[str, float] = {}
+        stage_started = time.perf_counter()
         telemetry, gpu_metadata = self.gpu_anomaly_agent.enrich(telemetry)
+        stage_latencies["anomaly_scoring"] = _elapsed_ms(stage_started)
+        stage_started = time.perf_counter()
         candidates = self._detect_cross_tower_candidates(incident, telemetry)
+        stage_latencies["cross_tower_correlation"] = _elapsed_ms(stage_started)
         rca_incident = _candidate_incident_or_original(incident, candidates)
+        stage_started = time.perf_counter()
         analysis = analyze_incident(rca_incident, telemetry, self.memory, reference_sources)
+        stage_latencies["rca_analysis"] = _elapsed_ms(stage_started)
+        stage_started = time.perf_counter()
         report = build_rca_markdown(rca_incident, analysis, reference_sources)
+        stage_latencies["report_generation"] = _elapsed_ms(stage_started)
         trace.extend(
             [
                 (
@@ -125,7 +152,14 @@ class UnifiedRCAAgent:
                 "Applied incident-memory learning adjustments",
             ]
         )
-        return AgentResult(analysis=analysis, report_markdown=report, agent_trace=trace)
+        return AgentResult(
+            analysis=analysis,
+            report_markdown=report,
+            agent_trace=trace,
+            token_usage={},
+            latency_ms=0.0,
+            stage_latencies_ms=stage_latencies,
+        )
 
     def _run_langchain_agent(
         self,
@@ -141,12 +175,15 @@ class UnifiedRCAAgent:
         except ImportError:
             return None
 
+        stage_latencies: dict[str, float] = {}
         state: dict[str, Any] = {"analysis": None, "telemetry": telemetry, "incident": incident, "candidates": []}
 
         @tool
         def run_gpu_time_series_anomaly_detection(_: str = "") -> str:
             """Score multivariate telemetry anomalies with the GPU time-series anomaly agent."""
+            stage_started = time.perf_counter()
             enriched, metadata = self.gpu_anomaly_agent.enrich(telemetry)
+            stage_latencies["anomaly_scoring"] = _elapsed_ms(stage_started)
             state["telemetry"] = enriched
             return json.dumps(
                 {
@@ -166,6 +203,7 @@ class UnifiedRCAAgent:
         @tool
         def correlate_cross_tower_data(_: str = "") -> str:
             """Correlate compute, storage, network, and application telemetry for the selected incident."""
+            stage_started = time.perf_counter()
             active_telemetry = state["telemetry"]
             if "gpu_anomaly_score" not in active_telemetry.columns:
                 active_telemetry, _ = self.gpu_anomaly_agent.enrich(active_telemetry)
@@ -173,7 +211,10 @@ class UnifiedRCAAgent:
             candidates = self._detect_cross_tower_candidates(incident, active_telemetry)
             state["candidates"] = candidates
             state["incident"] = _candidate_incident_or_original(incident, candidates)
+            stage_latencies["cross_tower_correlation"] = _elapsed_ms(stage_started)
+            stage_started = time.perf_counter()
             analysis = analyze_incident(state["incident"], active_telemetry, self.memory, reference_sources)
+            stage_latencies["rca_analysis"] = _elapsed_ms(stage_started)
             state["analysis"] = analysis
             return json.dumps(
                 {
@@ -192,12 +233,15 @@ class UnifiedRCAAgent:
         @tool
         def retrieve_incident_memory(_: str = "") -> str:
             """Retrieve resolved incident feedback used for continuous learning."""
+            stage_started = time.perf_counter()
             records = self.memory.load_all()
+            stage_latencies["memory_retrieval"] = _elapsed_ms(stage_started)
             return json.dumps(records[-5:], indent=2)
 
         @tool
         def generate_grounded_rca(_: str = "") -> str:
             """Generate the final human-readable RCA using current analysis and reference sources."""
+            stage_started = time.perf_counter()
             analysis = state["analysis"] or analyze_incident(
                 state["incident"],
                 state["telemetry"],
@@ -205,7 +249,9 @@ class UnifiedRCAAgent:
                 reference_sources,
             )
             state["analysis"] = analysis
-            return build_rca_markdown(state["incident"], analysis, reference_sources)
+            report = build_rca_markdown(state["incident"], analysis, reference_sources)
+            stage_latencies["report_generation"] = _elapsed_ms(stage_started)
+            return report
 
         llm = ChatOpenAI(
             model=vllm_model(),
@@ -237,6 +283,7 @@ class UnifiedRCAAgent:
             verbose=False,
             return_intermediate_steps=True,
         )
+        stage_started = time.perf_counter()
         response = executor.invoke(
             {
                 "input": (
@@ -247,6 +294,7 @@ class UnifiedRCAAgent:
                 )
             }
         )
+        stage_latencies["agent_executor"] = _elapsed_ms(stage_started)
         analysis = state["analysis"] or analyze_incident(
             state["incident"],
             state["telemetry"],
@@ -262,7 +310,14 @@ class UnifiedRCAAgent:
             "Tool: generate_grounded_rca",
             f"Intermediate tool steps: {len(response.get('intermediate_steps', []))}",
         ]
-        return AgentResult(analysis=analysis, report_markdown=report, agent_trace=trace)
+        return AgentResult(
+            analysis=analysis,
+            report_markdown=report,
+            agent_trace=trace,
+            token_usage={},
+            latency_ms=0.0,
+            stage_latencies_ms=stage_latencies,
+        )
 
     def _detect_cross_tower_candidates(
         self,
@@ -318,3 +373,7 @@ def _candidate_incident_or_original(
     if candidate["incident_id"].startswith("AUTO-"):
         merged["incident_id"] = incident.get("incident_id", candidate["incident_id"])
     return merged
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round((time.perf_counter() - started_at) * 1000, 2)

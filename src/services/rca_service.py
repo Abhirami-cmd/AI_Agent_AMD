@@ -86,6 +86,9 @@ class RCAService:
             "analysis": dataclasses.asdict(agent_result.analysis),
             "report_markdown": agent_result.report_markdown,
             "agent_trace": agent_result.agent_trace,
+            "token_usage": agent_result.token_usage,
+            "latency_ms": agent_result.latency_ms,
+            "stage_latencies_ms": agent_result.stage_latencies_ms,
             "reference_sources": self.get_reference_sources(operator_notes),
             "reference_source_used": get_reference_source_used(),
         }

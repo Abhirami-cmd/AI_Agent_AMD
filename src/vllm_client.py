@@ -8,6 +8,7 @@ import requests
 
 DEFAULT_VLLM_URL = "http://localhost:8000/v1/chat/completions"
 DEFAULT_MODEL = "Qwen/Qwen2.5-72B-Instruct"
+_TOKEN_USAGE_EVENTS: list[dict[str, int | str]] = []
 
 
 def is_vllm_configured() -> bool:
@@ -41,7 +42,38 @@ def generate_with_vllm(
     )
     response.raise_for_status()
     data = response.json()
+    _record_token_usage(data)
     return data["choices"][0]["message"]["content"].strip()
+
+
+def reset_token_usage() -> None:
+    _TOKEN_USAGE_EVENTS.clear()
+
+
+def consume_token_usage() -> dict[str, Any]:
+    events = list(_TOKEN_USAGE_EVENTS)
+    _TOKEN_USAGE_EVENTS.clear()
+    return {
+        "calls": len(events),
+        "prompt_tokens": sum(int(event.get("prompt_tokens", 0)) for event in events),
+        "completion_tokens": sum(int(event.get("completion_tokens", 0)) for event in events),
+        "total_tokens": sum(int(event.get("total_tokens", 0)) for event in events),
+        "events": events,
+    }
+
+
+def _record_token_usage(data: dict[str, Any]) -> None:
+    usage = data.get("usage") or {}
+    if not usage:
+        return
+    _TOKEN_USAGE_EVENTS.append(
+        {
+            "model": str(data.get("model", os.getenv("VLLM_MODEL", DEFAULT_MODEL))),
+            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+            "total_tokens": int(usage.get("total_tokens", 0) or 0),
+        }
+    )
 
 
 def _chat_endpoint() -> str:

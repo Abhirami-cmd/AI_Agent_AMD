@@ -369,6 +369,7 @@ def main() -> None:
             "4. Alternatives",
             "5. Feedback",
             "6. Topology",
+            "7. Metrics",
         ]
     )
 
@@ -546,6 +547,38 @@ def main() -> None:
         st.subheader("Topology")
         st.caption("Layered Application/Compute/Network topology with impacted towers highlighted and RCA annotations.")
         st.plotly_chart(topology_figure(incident, analysis), use_container_width=True)
+
+    with workflow_tabs[6]:
+        st.subheader("Metrics")
+        st.caption("Incident-wise execution metrics for agent tracing, token usage, and latency.")
+        if agent_result is None:
+            st.info("Loading metrics...")
+        else:
+            token_usage = getattr(agent_result, "token_usage", {}) or {}
+            latency_ms = float(getattr(agent_result, "latency_ms", 0.0) or 0.0)
+            stage_latencies = getattr(agent_result, "stage_latencies_ms", {}) or {}
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("End-to-End Latency", f"{latency_ms / 1000:.2f}s")
+            c2.metric("LLM Calls", str(token_usage.get("calls", 0)))
+            c3.metric("Prompt Tokens", str(token_usage.get("prompt_tokens", 0)))
+            c4.metric("Total Tokens", str(token_usage.get("total_tokens", 0)))
+
+            st.markdown("**Stage latency**")
+            if stage_latencies:
+                latency_df = pd.DataFrame(
+                    [
+                        {"stage": stage, "latency_ms": value}
+                        for stage, value in stage_latencies.items()
+                    ]
+                )
+                st.dataframe(latency_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No stage latency data captured.")
+
+            st.markdown("**Agent trace**")
+            for item in getattr(agent_result, "agent_trace", []) or []:
+                st.write(f"- {item}")
 
 
 if __name__ == "__main__":
